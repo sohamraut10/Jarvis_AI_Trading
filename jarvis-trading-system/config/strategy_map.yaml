@@ -1,0 +1,131 @@
+# strategy_map.yaml
+# Maps strategy IDs to their module path, preferred regimes, and timeframe.
+# JARVIS uses this to instantiate plugins and filter by active regime.
+
+strategies:
+  # ── Trend-following ─────────────────────────────────────────────────────────
+  - id: ema_crossover
+    module: strategies.trend.ema_crossover
+    class: EMACrossover
+    timeframe: 5min
+    regimes: [TRENDING_UP, TRENDING_DOWN]
+
+  - id: supertrend
+    module: strategies.trend.supertrend
+    class: SuperTrend
+    timeframe: 15min
+    regimes: [TRENDING_UP, TRENDING_DOWN]
+
+  - id: adx_trend_filter
+    module: strategies.trend.adx_trend_filter
+    class: ADXTrendFilter
+    timeframe: 15min
+    regimes: [TRENDING_UP, TRENDING_DOWN]
+
+  # ── Momentum / breakout ──────────────────────────────────────────────────────
+  - id: orb_breakout
+    module: strategies.momentum.orb_breakout
+    class: ORBBreakout
+    timeframe: 5min
+    regimes: [TRENDING_UP, TRENDING_DOWN, HIGH_VOL]
+
+  - id: rsi_momentum
+    module: strategies.momentum.rsi_momentum
+    class: RSIMomentum
+    timeframe: 5min
+    regimes: [TRENDING_UP, TRENDING_DOWN]
+
+  - id: vwap_breakout
+    module: strategies.momentum.vwap_breakout
+    class: VWAPBreakout
+    timeframe: 1min
+    regimes: [TRENDING_UP, HIGH_VOL]
+
+  - id: macd_histogram
+    module: strategies.momentum.macd_histogram
+    class: MACDHistogram
+    timeframe: 5min
+    regimes: [TRENDING_UP, TRENDING_DOWN]
+
+  # ── Mean-reversion ───────────────────────────────────────────────────────────
+  - id: bollinger_reversion
+    module: strategies.mean_reversion.bollinger_reversion
+    class: BollingerReversion
+    timeframe: 5min
+    regimes: [SIDEWAYS]
+
+  - id: rsi_reversal
+    module: strategies.mean_reversion.rsi_reversal
+    class: RSIReversal
+    timeframe: 5min
+    regimes: [SIDEWAYS]
+
+  - id: vwap_reversion
+    module: strategies.mean_reversion.vwap_reversion
+    class: VWAPReversion
+    timeframe: 1min
+    regimes: [SIDEWAYS]
+
+  # ── Scalping ─────────────────────────────────────────────────────────────────
+  - id: tick_scalper
+    module: strategies.scalping.tick_scalper
+    class: TickScalper
+    timeframe: 1min
+    regimes: [TRENDING_UP, TRENDING_DOWN, HIGH_VOL]
+
+  - id: level2_scalper
+    module: strategies.scalping.level2_scalper
+    class: Level2Scalper
+    timeframe: 1min
+    regimes: [TRENDING_UP, TRENDING_DOWN]
+
+  - id: gap_fade
+    module: strategies.scalping.gap_fade
+    class: GapFade
+    timeframe: 1min
+    regimes: [HIGH_VOL]
+
+  # ── Options-flow aware ───────────────────────────────────────────────────────
+  - id: gamma_wall_fade
+    module: strategies.options_flow.gamma_wall_fade
+    class: GammaWallFade
+    timeframe: 5min
+    regimes: [SIDEWAYS, HIGH_VOL]
+
+  - id: pcr_contrarian
+    module: strategies.options_flow.pcr_contrarian
+    class: PCRContrarian
+    timeframe: 15min
+    regimes: [SIDEWAYS, HIGH_VOL]
+
+  - id: oi_buildup
+    module: strategies.options_flow.oi_buildup
+    class: OIBuildup
+    timeframe: 15min
+    regimes: [TRENDING_UP, TRENDING_DOWN]
+
+  # ── Volatility ───────────────────────────────────────────────────────────────
+  - id: vix_spike_fade
+    module: strategies.volatility.vix_spike_fade
+    class: VIXSpikeFade
+    timeframe: 15min
+    regimes: [HIGH_VOL]
+
+  - id: iv_crush
+    module: strategies.volatility.iv_crush
+    class: IVCrush
+    timeframe: 15min
+    regimes: [HIGH_VOL]
+
+  # ── Swing ────────────────────────────────────────────────────────────────────
+  - id: swing_hl
+    module: strategies.swing.swing_hl
+    class: SwingHL
+    timeframe: 15min
+    regimes: [TRENDING_UP, TRENDING_DOWN]
+
+  - id: channel_breakout
+    module: strategies.swing.channel_breakout
+    class: ChannelBreakout
+    timeframe: 15min
+    regimes: [TRENDING_UP, SIDEWAYS]
