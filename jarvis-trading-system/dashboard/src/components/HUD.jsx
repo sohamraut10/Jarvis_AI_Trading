@@ -36,21 +36,26 @@ export default function HUD({ snapshot, connected, onKill, mode }) {
 
       {/* WS status */}
       <span className={`text-xs shrink-0 ${connected ? "text-green-500" : "text-red-500"}`}>
-        {connected ? "● LIVE" : "○ RECONNECTING"}
+        <span className="sm:hidden">{connected ? "●" : "○"}</span>
+        <span className="hidden sm:inline">{connected ? "● LIVE" : "○ RECONNECTING"}</span>
       </span>
 
       <div className="flex-1" />
 
-      {/* Capital */}
-      <Metric label="CAPITAL" value={formatCurrency(broker.capital ?? 0)} />
+      {/* Capital — hidden on mobile */}
+      <div className="hidden sm:block">
+        <Metric label="CAPITAL" value={formatCurrency(broker.capital ?? 0)} />
+      </div>
 
-      {/* Portfolio */}
-      <Metric
-        label="PORTFOLIO"
-        value={formatCurrency(broker.portfolio_value ?? 0)}
-      />
+      {/* Portfolio — hidden on mobile */}
+      <div className="hidden sm:block">
+        <Metric
+          label="PORTFOLIO"
+          value={formatCurrency(broker.portfolio_value ?? 0)}
+        />
+      </div>
 
-      {/* Daily P&L */}
+      {/* Daily P&L — always visible */}
       <Metric
         label="DAILY P&L"
         value={formatCurrency(pnl, true)}
