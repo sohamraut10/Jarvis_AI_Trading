@@ -130,31 +130,17 @@ class DhanFeed:
                     feed = mf.DhanFeed(
                         self._client_id,
                         self._access_token,
-                        instruments,
-                        subscription_type=mf.Ticker,
-                        on_ticks=_on_ticks,
-                        on_open=_on_open,
-                        on_close=_on_close,
-                        on_error=_on_error,
+                        instruments,       # each tuple already contains subscription type
                     )
+                    # Callbacks are set as attributes, not constructor kwargs
+                    feed.on_ticks = _on_ticks
+                    _on_open()
                     feed.run_forever()
-                except TypeError:
-                    # Older dhanhq versions don't accept on_open/on_close kwargs
-                    try:
-                        feed = mf.DhanFeed(
-                            self._client_id,
-                            self._access_token,
-                            instruments,
-                            subscription_type=mf.Ticker,
-                            on_ticks=_on_ticks,
-                        )
-                        _on_open()
-                        feed.run_forever()
-                    except Exception as exc:
-                        logger.error("[Dhan] feed error: %s", exc)
+                    # run_forever() returned — means disconnected
+                    _on_close()
                 except Exception as exc:
                     self.connected = False
-                    logger.error("[Dhan] unexpected error: %s", exc)
+                    logger.error("[Dhan] feed error: %s", exc)
 
                 if not self._running:
                     break
@@ -163,9 +149,6 @@ class DhanFeed:
                 time.sleep(10)
 
             logger.info("[Dhan] feed stopped")
-            # If we lost connection, fall back to sim
-            if not self.connected and self._running:
-                asyncio.run_coroutine_threadsafe(self._fallback(tick_callback), loop)
 
         loop.run_in_executor(None, _run)
 
