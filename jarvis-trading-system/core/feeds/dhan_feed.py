@@ -137,6 +137,7 @@ class DhanFeed:
                         self._client_id,
                         self._access_token,
                         instruments,       # each tuple already contains subscription type
+                        version='v2',      # v2 uses URL query-param auth (avoids HTTP 400)
                     )
                     # Callbacks are set as attributes, not constructor kwargs
                     feed.on_ticks = _on_ticks
