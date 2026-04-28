@@ -104,6 +104,9 @@ class DhanFeed:
             await self._fallback(tick_callback)
             return
 
+        # Quick REST API pre-check — tells us if token is valid before WS
+        await self._preflight_check()
+
         def _on_tick(sym: str, ltp: float, vol: int) -> None:
             self._ltp[sym] = ltp
             self.ticks_received += 1
@@ -166,6 +169,13 @@ class DhanFeed:
                     label = "connected" if self._reconnects == 1 else f"reconnected #{self._reconnects}"
                     logger.info("[Dhan] %s — sending subscription for %d instruments", label, len(sec_ids))
 
+                    # Some servers send a greeting before they accept subscriptions
+                    try:
+                        greeting = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                        logger.info("[Dhan] server greeting: %r", greeting[:80] if isinstance(greeting, bytes) else greeting[:200])
+                    except asyncio.TimeoutError:
+                        pass  # no greeting — normal
+
                     await ws.send(sub_msg)
                     logger.info("[Dhan] subscription sent — waiting for ticks…")
 
@@ -213,6 +223,37 @@ class DhanFeed:
             wait = min(10 * attempt, 60)
             logger.warning("[Dhan] retrying in %ds (attempt #%d done)", wait, attempt)
             await asyncio.sleep(wait)
+
+    async def _preflight_check(self) -> None:
+        """Validate credentials via Dhan REST API before connecting WebSocket."""
+        import requests
+        try:
+            resp = requests.get(
+                "https://api.dhan.co/v2/fundlimit",
+                headers={
+                    "access-token": self._access_token,
+                    "client-id":    self._client_id,
+                    "Content-Type": "application/json",
+                },
+                timeout=8,
+            )
+            if resp.status_code == 200:
+                logger.info("[Dhan] REST pre-check OK — token valid, account active")
+            elif resp.status_code == 401:
+                logger.error(
+                    "[Dhan] REST pre-check FAILED 401 — access token EXPIRED or INVALID\n"
+                    "  → Generate a new token: Dhan app → My Profile → Access Token\n"
+                    "  → Update ACCESS_TOKEN in jarvis-trading-system/.env"
+                )
+            elif resp.status_code == 403:
+                logger.error(
+                    "[Dhan] REST pre-check FAILED 403 — account not authorised\n"
+                    "  → Enable API access: Dhan portal → APIs"
+                )
+            else:
+                logger.warning("[Dhan] REST pre-check: HTTP %d — %s", resp.status_code, resp.text[:120])
+        except Exception as exc:
+            logger.warning("[Dhan] REST pre-check skipped (no network?): %s", exc)
 
     async def _fallback(self, tick_callback: Callable) -> None:
         logger.info("[Dhan] switching to SimulatedFeed")
