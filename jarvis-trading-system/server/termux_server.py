@@ -15,7 +15,7 @@ import json
 import logging
 import pathlib
 from collections import defaultdict, deque
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlparse, parse_qs
 
@@ -41,6 +41,9 @@ from strategies.trend.supertrend import SuperTrend
 import websockets
 
 logger = logging.getLogger(__name__)
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 # ── Settings (pure JSON, no pydantic) ─────────────────────────────────────────
 
@@ -250,7 +253,7 @@ class JarvisEngine:
             # Log feed alive every 500 ticks (~50s with SimulatedFeed)
             if self._tick_count % 500 == 0:
                 logger.info("feed alive  ticks=%d  %s=₹%.2f", self._tick_count, symbol, ltp)
-            for bar in self._aggregator.update(symbol, ltp, volume, datetime.utcnow()):
+            for bar in self._aggregator.update(symbol, ltp, volume, _utcnow()):
                 await self._on_bar(bar)
         except Exception as exc:
             logger.error("tick error %s: %s", symbol, exc)
@@ -296,7 +299,7 @@ class JarvisEngine:
 
     async def _on_signal(self, signal: Signal, strategy: BaseStrategy) -> None:
         key = f"{signal.strategy_id}:{signal.symbol}:{signal.side}"
-        now = datetime.utcnow()
+        now = _utcnow()
         last = self._signal_dedup.get(key)
         if last and (now - last).total_seconds() < SIGNAL_DEDUP_SECONDS:
             logger.debug("signal deduped  %s (last: %ds ago)",
@@ -360,7 +363,7 @@ class JarvisEngine:
 
     def snapshot(self) -> dict:
         return {
-            "type": "snapshot", "ts": datetime.utcnow().isoformat(),
+            "type": "snapshot", "ts": _utcnow().isoformat(),
             "regime": str(self._regime), "regime_features": self._regime_features,
             "broker": self._broker.snapshot(), "allocations": self._allocations,
             "signals": list(self._recent_signals)[-10:],
@@ -420,7 +423,7 @@ async def _broadcast_loop() -> None:
                 logger.debug("broadcast send error (removing client): %s", exc)
                 dead.add(ws)
         if dead:
-            _ws_clients -= dead
+            _ws_clients.difference_update(dead)  # in-place, avoids UnboundLocalError
             logger.debug("removed %d stale WS client(s)", len(dead))
 
 # ── HTTP API server ───────────────────────────────────────────────────────────
