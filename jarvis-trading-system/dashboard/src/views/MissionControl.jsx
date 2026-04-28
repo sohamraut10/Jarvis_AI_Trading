@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import IntelligencePanel from "../components/IntelligencePanel";
 import PnLPanel from "../components/PnLPanel";
 import PositionTable from "../components/PositionTable";
 import SignalLog from "../components/SignalLog";
@@ -242,6 +243,7 @@ export default function MissionControl({ snapshot, pnlHistory, signals, connecte
       </div>
       {/* right 1/3 */}
       <div className="flex flex-col gap-4">
+        <IntelligencePanel snapshot={snapshot} />
         <MarketScanner scanner={snapshot?.scanner} connected={connected} onSearchOpen={onSearchOpen} />
         <StrategyRanks snapshot={snapshot} />
         <HealthTile snapshot={snapshot} connected={connected} />

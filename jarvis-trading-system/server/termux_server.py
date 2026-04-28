@@ -28,6 +28,7 @@ from core.risk.risk_manager import RiskManager
 from core.types import Regime
 from intelligence.alpha_decay_monitor import AlphaDecayMonitor
 from intelligence.intent_logger import IntentLogger
+from intelligence.pair_selector import PairSelector
 from intelligence.pnl_tracker import PnLTracker
 from intelligence.regime_classifier import RegimeClassifier
 from intelligence.strategy_shift_engine import StrategyShiftEngine
@@ -201,6 +202,12 @@ class JarvisEngine:
         self._running = False
         self._tasks: list[asyncio.Task] = []
         self._tick_count = 0
+        # Intelligence / pair-selector
+        self._pair_selector         = PairSelector()
+        self._intelligence_scores: list[dict] = []
+        self._auto_select_enabled:  bool      = True
+        self._selected_symbols:     set[str]  = set()
+        self._intelligence_updated: datetime  = _utcnow()
 
     async def start(self) -> None:
         await self._pnl_tracker.init()
@@ -217,6 +224,7 @@ class JarvisEngine:
         logger.info("=" * 55)
         self._tasks.append(asyncio.create_task(self._feed.start(self._on_tick)))
         self._tasks.append(asyncio.create_task(self._heartbeat_loop()))
+        self._tasks.append(asyncio.create_task(self._intelligence_loop()))
 
     async def stop(self) -> None:
         self._running = False
@@ -250,6 +258,47 @@ class JarvisEngine:
             except Exception as exc:
                 logger.warning("heartbeat error: %s", exc)
             await asyncio.sleep(300)  # every 5 min
+
+    async def _intelligence_loop(self) -> None:
+        await asyncio.sleep(60)   # wait for prices to accumulate
+        while self._running:
+            try:
+                self._run_pair_selection()
+            except Exception as exc:
+                logger.warning("intelligence loop error: %s", exc)
+            await asyncio.sleep(300)  # re-score every 5 min
+
+    def _run_pair_selection(self) -> None:
+        scanner = {}
+        if hasattr(self._feed, "scanner_data"):
+            scanner = self._feed.scanner_data()
+        else:
+            syms = getattr(self._feed, "_symbols", None) or []
+            for s in syms:
+                scanner[s] = {"status": "live", "ticks": self._tick_count,
+                               "ltp": self._feed.current_price(s),
+                               "last_tick_ago": 1.0, "is_currency": s.endswith("INR")}
+
+        scores = self._pair_selector.score_all(
+            scanner, self._close_history, list(self._recent_signals), self._regime
+        )
+        self._intelligence_scores = [
+            {
+                "symbol":      s.symbol,
+                "score":       s.score,
+                "rank":        s.rank,
+                "recommended": s.recommended,
+                "components":  s.components,
+                "reasoning":   s.reasoning,
+            }
+            for s in scores
+        ]
+        if self._auto_select_enabled:
+            self._selected_symbols = {s.symbol for s in scores if s.recommended}
+        self._intelligence_updated = _utcnow()
+        if scores:
+            top = [f"{s.symbol}({s.score:.0f})" for s in scores[:3]]
+            logger.info("intelligence  top-3: %s  auto_select=%s", ", ".join(top), self._auto_select_enabled)
 
     async def _on_tick(self, symbol: str, ltp: float, volume: float) -> None:
         if not self._running:
@@ -293,6 +342,13 @@ class JarvisEngine:
             if bar.symbol not in self._feed.active_symbols():
                 logger.debug("bar skipped — %s not yet confirmed live", bar.symbol)
                 return
+
+        # Intelligence auto-select: skip symbols not in the recommended set
+        if self._auto_select_enabled and self._selected_symbols and \
+                bar.symbol not in self._selected_symbols:
+            logger.debug("bar skipped — %s not in AI-selected set %s",
+                         bar.symbol, self._selected_symbols)
+            return
 
         for sid in _TF_MAP.get(bar.timeframe, []):
             strat = self._strategies.get(sid)
@@ -384,6 +440,8 @@ class JarvisEngine:
         logger.info("allocations recomputed  %s",
                     "  ".join(f"{k}={v:.0%}" for k, v in result.allocations.items() if v > 0))
         await self._intent_logger.log_allocation(result)
+        # re-score pairs when regime changes
+        self._run_pair_selection()
 
     def snapshot(self) -> dict:
         scanner = {}
@@ -404,6 +462,12 @@ class JarvisEngine:
             "ltp": {s: round(v, 4) if s.endswith("INR") else round(v, 2)
                     for s, v in self._broker._ltp.items()},
             "scanner": scanner,
+            "intelligence": {
+                "scores":           self._intelligence_scores,
+                "auto_select":      self._auto_select_enabled,
+                "selected_symbols": list(self._selected_symbols),
+                "updated_at":       self._intelligence_updated.isoformat(),
+            },
         }
 
     async def manual_kill(self) -> None:
@@ -649,6 +713,28 @@ async def _route(method: str, path: str, query: dict, body: dict) -> tuple[int, 
                     entry["display"]   = inst.get("display")
             instruments.append(entry)
         return 200, {"instruments": instruments}
+
+    if path == "/api/intelligence/recommendation":
+        if not _engine:
+            return 200, {"scores": [], "auto_select": True, "selected_symbols": []}
+        _engine._run_pair_selection()   # refresh on demand
+        return 200, _engine.snapshot()["intelligence"]
+
+    if path == "/api/intelligence/toggle_auto" and method == "POST":
+        if _engine:
+            _engine._auto_select_enabled = bool(body.get("enabled", True))
+            if not _engine._auto_select_enabled:
+                _engine._selected_symbols = set()
+            logger.info("Intelligence auto-select %s", "ON" if _engine._auto_select_enabled else "OFF")
+        return 200, {"auto_select": _engine._auto_select_enabled if _engine else True}
+
+    if path == "/api/intelligence/override" and method == "POST":
+        symbols = [s for s in body.get("symbols", []) if isinstance(s, str)]
+        if _engine:
+            _engine._auto_select_enabled = False
+            _engine._selected_symbols = set(symbols)
+            logger.info("Intelligence manual override: %s", symbols)
+        return 200, {"status": "overridden", "selected_symbols": symbols}
 
     if path == "/api/instruments/scrip_status":
         from core.feeds.dhan_instruments import get_scrip_master
