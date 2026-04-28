@@ -1,5 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# JARVIS Termux launcher — uses pure-Python server (no FastAPI/pydantic)
+# JARVIS Termux launcher
+# Backend runs in FOREGROUND so all engine logs print to this terminal.
+# Vite runs in background; its logs go to /tmp/jarvis_vite.log
 
 set -e
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -11,11 +13,8 @@ if [ ! -f data/settings.json ]; then
   echo '{"paper_mode":true,"initial_capital":10000,"kill_switch_pct":0.03}' > data/settings.json
 fi
 
+# ── Smoke-test ────────────────────────────────────────────────────────────────
 echo ""
-echo "  JARVIS Trading Command Center"
-echo "  ─────────────────────────────"
-
-# ── Smoke-test: only need numpy + websockets ──────────────────────────────────
 echo "  Checking dependencies…"
 python - <<'PYCHECK'
 import sys
@@ -33,51 +32,37 @@ if missing:
 print("  Deps OK")
 PYCHECK
 
-# ── Start backend ─────────────────────────────────────────────────────────────
-echo "  Starting backend  (WS:8765  HTTP:8766)…"
-python -m server.termux_server > logs/server.log 2>&1 &
-BACKEND_PID=$!
+# ── Start Vite in background ──────────────────────────────────────────────────
+echo "  Starting dashboard (port 5173)…"
+cd dashboard
+npm run dev -- --host 0.0.0.0 --config vite.termux.config.js \
+  > /tmp/jarvis_vite.log 2>&1 &
+VITE_PID=$!
+cd "$REPO_DIR"
 
-# Wait up to 20s for HTTP API to respond
-READY=0
-for i in $(seq 1 20); do
+# Wait for Vite to be ready (up to 15s)
+for i in $(seq 1 15); do
   sleep 1
-  if curl -sf http://127.0.0.1:8766/api/status > /dev/null 2>&1; then
-    READY=1
-    echo "  Backend ready ✓"
+  if grep -q "Local:" /tmp/jarvis_vite.log 2>/dev/null; then
     break
   fi
 done
-
-if [ $READY -eq 0 ]; then
-  echo ""
-  echo "  ✗ Backend failed. Last error:"
-  echo "  ────────────────────────────────────────"
-  tail -20 logs/server.log
-  echo "  ────────────────────────────────────────"
-  echo "  Debug: python -m server.termux_server"
-  kill $BACKEND_PID 2>/dev/null
-  exit 1
-fi
-
-# ── Start frontend (Termux Vite config: API→8766) ─────────────────────────────
-echo "  Starting dashboard (port 5173)…"
-cd dashboard
-npm run dev -- --host 0.0.0.0 --config vite.termux.config.js &
-VITE_PID=$!
-cd "$REPO_DIR"
-sleep 3
 
 LOCAL_IP=$(ip route get 1.1.1.1 2>/dev/null | awk '/src/{print $7}' \
            || hostname -I 2>/dev/null | awk '{print $1}')
 
 echo ""
-echo "  ────────────────────────────────────────"
-echo "  Open in Chrome:  http://localhost:5173"
-[ -n "$LOCAL_IP" ] && echo "  From another device: http://$LOCAL_IP:5173"
-echo "  ────────────────────────────────────────"
-echo "  Ctrl-C to stop"
+echo "  ────────────────────────────────────────────"
+echo "  Dashboard : http://localhost:5173"
+[ -n "$LOCAL_IP" ] && echo "  From PC   : http://$LOCAL_IP:5173"
+echo "  Vite logs : tail -f /tmp/jarvis_vite.log"
+echo "  ────────────────────────────────────────────"
+echo "  Starting backend — engine logs appear below"
+echo "  Press Ctrl-C to stop everything"
 echo ""
 
-trap "echo 'Stopping…'; kill $BACKEND_PID $VITE_PID 2>/dev/null; exit 0" INT TERM
-wait
+# Kill Vite when the backend exits (Ctrl-C or crash)
+trap "echo ''; echo 'Stopping…'; kill $VITE_PID 2>/dev/null; exit 0" INT TERM EXIT
+
+# ── Run backend in FOREGROUND (logs print here) ───────────────────────────────
+python -m server.termux_server
