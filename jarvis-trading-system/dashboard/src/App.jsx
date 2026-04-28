@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import ApprovalBanner from "./components/ApprovalBanner";
 import DrawdownBar from "./components/DrawdownBar";
+import GlobalSearch from "./components/GlobalSearch";
 import HUD from "./components/HUD";
 import NavBar from "./components/NavBar";
 import NotificationStack from "./components/NotificationStack";
@@ -34,6 +35,7 @@ export default function App() {
   const notifs   = useNotifications();
 
   const [view, setView]           = useState("mission");
+  const [searchOpen, setSearchOpen] = useState(false);
   const [pnlHistory, setPnlHistory] = useState([]);
   const [signals, setSignals]     = useState([]);
   const [riskParams, setRiskParams] = useState(DEFAULT_RISK);
@@ -125,7 +127,7 @@ export default function App() {
         />
       )}
 
-      <NavBar active={view} onChange={setView} />
+      <NavBar active={view} onChange={setView} onSearchOpen={() => setSearchOpen(true)} />
 
       <main className="flex-1 overflow-auto min-h-0">
         {view === "mission" && (
@@ -134,6 +136,7 @@ export default function App() {
             pnlHistory={pnlHistory}
             signals={signals}
             connected={connected}
+            onSearchOpen={() => setSearchOpen(true)}
           />
         )}
         {view === "arena" && (
@@ -155,12 +158,18 @@ export default function App() {
             filters={notifs.filters}
             toggleFilter={notifs.toggleFilter}
             onKill={handleKill}
+            onSearchOpen={() => setSearchOpen(true)}
           />
         )}
         {view === "log" && <CommandLog />}
       </main>
 
       <NotificationStack banners={notifs.banners} onDismiss={notifs.dismiss} />
+      <GlobalSearch
+        snapshot={snapshot}
+        open={searchOpen}
+        onClose={() => setSearchOpen(false)}
+      />
     </div>
   );
 }

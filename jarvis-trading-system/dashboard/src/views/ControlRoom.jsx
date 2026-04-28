@@ -168,7 +168,7 @@ function KillSwitchPanel({ killed, onKill, onReset }) {
   );
 }
 
-// ── Instrument Picker ─────────────────────────────────────────────────────────
+// ── Active Watchlist ──────────────────────────────────────────────────────────
 
 const STATUS_DOT = {
   live:      "bg-green-400 animate-pulse",
@@ -187,12 +187,9 @@ const BADGE_CLS = {
   IDX: "text-gray-400 border-gray-700 bg-gray-900/30",
 };
 
-function InstrumentPicker({ snapshot }) {
-  const [query,     setQuery]     = useState("");
-  const [results,   setResults]   = useState([]);
-  const [searching, setSearching] = useState(false);
+function ActiveWatchlist({ snapshot, onSearchOpen }) {
   const [watchlist, setWatchlist] = useState([]);
-  const debounceRef = useRef(null);
+  const intervalRef = useRef(null);
 
   const loadWatchlist = useCallback(() => {
     fetch("/api/instruments/watchlist")
@@ -201,46 +198,15 @@ function InstrumentPicker({ snapshot }) {
       .catch(() => {});
   }, []);
 
-  useEffect(() => { loadWatchlist(); }, [loadWatchlist]);
+  useEffect(() => {
+    loadWatchlist();
+    intervalRef.current = setInterval(loadWatchlist, 30000);
+    return () => clearInterval(intervalRef.current);
+  }, [loadWatchlist]);
 
   // Merge live scanner data into watchlist entries
   const scanner = snapshot?.scanner ?? {};
   const enriched = watchlist.map((inst) => ({ ...inst, ...(scanner[inst.symbol] ?? {}) }));
-
-  // Debounced search
-  useEffect(() => {
-    clearTimeout(debounceRef.current);
-    if (!query.trim()) { setResults([]); return; }
-    debounceRef.current = setTimeout(async () => {
-      setSearching(true);
-      try {
-        const r = await fetch(`/api/instruments/search?q=${encodeURIComponent(query.trim())}&limit=25`);
-        const d = await r.json();
-        setResults(d.results ?? []);
-      } catch {
-        setResults([]);
-      } finally {
-        setSearching(false);
-      }
-    }, 300);
-    return () => clearTimeout(debounceRef.current);
-  }, [query]);
-
-  const subscribe = async (inst) => {
-    await fetch("/api/instruments/subscribe", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        security_id:      inst.security_id,
-        exchange_segment: inst.segment,
-        symbol:           inst.symbol,
-        lot_size:         inst.lot_size ?? 1,
-      }),
-    }).catch(() => {});
-    setQuery("");
-    setResults([]);
-    setTimeout(loadWatchlist, 600);
-  };
 
   const unsubscribe = async (sym) => {
     await fetch("/api/instruments/unsubscribe", {
@@ -251,60 +217,23 @@ function InstrumentPicker({ snapshot }) {
     setWatchlist((p) => p.filter((i) => i.symbol !== sym));
   };
 
-  const subscribedSyms = new Set(enriched.map((e) => e.symbol));
-  const filteredResults = results.filter((r) => !subscribedSyms.has(r.symbol));
-
   return (
     <div className="space-y-3">
-      {/* Search input */}
-      <div className="relative">
-        <input
-          type="text"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search NIFTY, GBPINR, RELIANCE, BANKNIFTY…"
-          className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-xs text-gray-200
-                     font-mono focus:outline-none focus:border-cyan-700 placeholder-gray-600"
-        />
-        {searching && (
-          <span className="absolute right-3 top-2.5 text-[9px] text-cyan-600 animate-pulse">
-            searching…
-          </span>
-        )}
-      </div>
+      {/* Add button */}
+      <button
+        onClick={onSearchOpen}
+        className="w-full flex items-center justify-center gap-2 py-2 rounded border border-dashed
+                   border-cyan-800 text-cyan-700 text-xs font-mono hover:text-cyan-400
+                   hover:border-cyan-600 transition-colors"
+      >
+        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+          <circle cx="11" cy="11" r="8" />
+          <path d="M21 21l-4.35-4.35" strokeLinecap="round" />
+        </svg>
+        SEARCH &amp; ADD INSTRUMENTS
+      </button>
 
-      {/* Search results dropdown */}
-      {filteredResults.length > 0 && (
-        <div className="border border-gray-700 rounded overflow-hidden max-h-52 overflow-y-auto">
-          {filteredResults.map((inst, i) => {
-            const badge = inst.badge ?? "EQ";
-            return (
-              <button
-                key={`${inst.security_id}-${i}`}
-                onClick={() => subscribe(inst)}
-                className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-800 transition-colors
-                           border-b border-gray-800 last:border-0 text-left"
-              >
-                <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded border tracking-widest shrink-0 ${BADGE_CLS[badge] ?? BADGE_CLS.EQ}`}>
-                  {badge}
-                </span>
-                <div className="flex-1 min-w-0">
-                  <div className="text-xs font-mono text-gray-200 truncate">
-                    {inst.display || inst.symbol}
-                  </div>
-                  <div className="text-[9px] text-gray-600">{inst.seg_label} · lot {inst.lot_size ?? 1}</div>
-                </div>
-                <span className="text-[9px] text-cyan-700 shrink-0">+ add</span>
-              </button>
-            );
-          })}
-        </div>
-      )}
-      {query.trim() && !searching && filteredResults.length === 0 && results.length === 0 && (
-        <p className="text-[10px] text-gray-600 text-center">No results — scrip master may still be loading</p>
-      )}
-
-      {/* Active instruments */}
+      {/* Active instruments list */}
       {enriched.length === 0 ? (
         <p className="text-xs text-gray-600 text-center py-2">No instruments subscribed</p>
       ) : (
@@ -465,6 +394,7 @@ export default function ControlRoom({
   approvalTimeout, setApprovalTimeout,
   filters, toggleFilter,
   onKill,
+  onSearchOpen,
 }) {
   const [s, setS]           = useState(DEFAULT_S);
   const [dirty, setDirty]   = useState(false);
@@ -551,9 +481,9 @@ export default function ControlRoom({
           fmt={(v) => `${v}s`} />
       </Section>
 
-      {/* ── Instrument Picker ───────────────────────────────────── */}
-      <Section title="Instrument Picker" badge={IMMEDIATE}>
-        <InstrumentPicker snapshot={snapshot} />
+      {/* ── Active Instruments ──────────────────────────────────── */}
+      <Section title="Active Instruments" badge={IMMEDIATE}>
+        <ActiveWatchlist snapshot={snapshot} onSearchOpen={onSearchOpen} />
       </Section>
 
       {/* ── Strategies ───────────────────────────────────────────── */}

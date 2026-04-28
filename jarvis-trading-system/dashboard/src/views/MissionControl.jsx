@@ -72,7 +72,7 @@ function PairRow({ sym, data, flash }) {
   );
 }
 
-function MarketScanner({ scanner, connected }) {
+function MarketScanner({ scanner, connected, onSearchOpen }) {
   const prevRef  = useRef({});
   const [flash, setFlash] = useState({});
 
@@ -106,11 +106,23 @@ function MarketScanner({ scanner, connected }) {
         <span className="text-[10px] text-gray-500 tracking-widest uppercase">
           Market Scanner
         </span>
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-2">
           <span className={`w-1.5 h-1.5 rounded-full ${connected ? "bg-green-500 animate-pulse" : "bg-gray-600"}`} />
           <span className="text-[9px] text-gray-600 font-mono">
             {connected ? `${liveCount}/${totalCount} live` : "disconnected"}
           </span>
+          {onSearchOpen && (
+            <button
+              onClick={onSearchOpen}
+              title="Add instrument"
+              className="w-6 h-6 flex items-center justify-center rounded border border-gray-800
+                         text-gray-600 hover:text-cyan-400 hover:border-cyan-800 transition-colors"
+            >
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                <path strokeLinecap="round" d="M12 5v14M5 12h14" />
+              </svg>
+            </button>
+          )}
         </div>
       </div>
 
@@ -205,7 +217,7 @@ function HealthTile({ snapshot, connected }) {
 
 // ── Main view ─────────────────────────────────────────────────────────────────
 
-export default function MissionControl({ snapshot, pnlHistory, signals, connected }) {
+export default function MissionControl({ snapshot, pnlHistory, signals, connected, onSearchOpen }) {
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 p-4">
       {/* left 2/3 */}
@@ -219,7 +231,7 @@ export default function MissionControl({ snapshot, pnlHistory, signals, connecte
       </div>
       {/* right 1/3 */}
       <div className="flex flex-col gap-4">
-        <MarketScanner scanner={snapshot?.scanner} connected={connected} />
+        <MarketScanner scanner={snapshot?.scanner} connected={connected} onSearchOpen={onSearchOpen} />
         <StrategyRanks snapshot={snapshot} />
         <HealthTile snapshot={snapshot} connected={connected} />
       </div>
