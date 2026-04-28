@@ -1,7 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # JARVIS Termux launcher
 # Backend runs in FOREGROUND so all engine logs print to this terminal.
-# Vite runs in background; its logs go to /tmp/jarvis_vite.log
+# Vite runs in background; its logs go to $TMPDIR/jarvis_vite.log
 
 set -e
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -12,6 +12,8 @@ mkdir -p data logs
 if [ ! -f data/settings.json ]; then
   echo '{"paper_mode":true,"initial_capital":10000,"kill_switch_pct":0.03}' > data/settings.json
 fi
+
+VITE_LOG="${TMPDIR:-$HOME}/jarvis_vite.log"
 
 # ── Smoke-test ────────────────────────────────────────────────────────────────
 echo ""
@@ -36,14 +38,14 @@ PYCHECK
 echo "  Starting dashboard (port 5173)…"
 cd dashboard
 npm run dev -- --host 0.0.0.0 --config vite.termux.config.js \
-  > /tmp/jarvis_vite.log 2>&1 &
+  > "$VITE_LOG" 2>&1 &
 VITE_PID=$!
 cd "$REPO_DIR"
 
 # Wait for Vite to be ready (up to 15s)
 for i in $(seq 1 15); do
   sleep 1
-  if grep -q "Local:" /tmp/jarvis_vite.log 2>/dev/null; then
+  if grep -q "Local:" "$VITE_LOG" 2>/dev/null; then
     break
   fi
 done
@@ -55,7 +57,7 @@ echo ""
 echo "  ────────────────────────────────────────────"
 echo "  Dashboard : http://localhost:5173"
 [ -n "$LOCAL_IP" ] && echo "  From PC   : http://$LOCAL_IP:5173"
-echo "  Vite logs : tail -f /tmp/jarvis_vite.log"
+echo "  Vite logs : tail -f $VITE_LOG"
 echo "  ────────────────────────────────────────────"
 echo "  Starting backend — engine logs appear below"
 echo "  Press Ctrl-C to stop everything"
