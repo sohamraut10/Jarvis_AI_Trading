@@ -4,6 +4,7 @@
 # All packages here are pure Python or have pre-built wheels.
 # No FastAPI, no pydantic, no orjson, no pydantic-core.
 
+dhanhq==2.0.1          # Dhan broker SDK  (pure Python)
 websockets==12.0       # WebSocket server (pure Python)
 aiosqlite==0.20.0      # async SQLite  (pure Python)
 apscheduler==3.10.4    # scheduler     (pure Python)

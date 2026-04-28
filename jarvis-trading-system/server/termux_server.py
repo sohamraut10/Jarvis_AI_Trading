@@ -70,10 +70,10 @@ SIGNAL_DEDUP_SECONDS   = 60
 WS_PORT   = 8765
 HTTP_PORT = 8766
 
-WATCH_SYMBOLS: list[str] = ["RELIANCE", "TCS", "INFY", "HDFC", "SBIN"]
+WATCH_SYMBOLS: list[str] = ["RELIANCE", "TCS", "INFY", "HDFCBANK", "SBIN"]
 BASE_PRICES: dict[str, float] = {
     "RELIANCE": 2500.0, "TCS": 3800.0, "INFY": 1500.0,
-    "HDFC": 1700.0, "SBIN": 800.0,
+    "HDFCBANK": 1700.0, "SBIN": 800.0,
 }
 _TF_MAP: dict[str, list[str]] = {
     "1min": ["vwap_breakout"],
@@ -166,6 +166,7 @@ class JarvisEngine:
         kelly_fraction: float = 0.5,
         intent_log_path: str = "logs/intent.jsonl",
         pnl_db_path: str = "data/pnl.db",
+        feed=None,
     ) -> None:
         self._broker       = PaperBroker(initial_capital=initial_capital, kill_switch_amount=kill_switch_amount)
         self._risk_manager = RiskManager(self._broker, kill_switch_amount=kill_switch_amount)
@@ -181,7 +182,7 @@ class JarvisEngine:
             "orb_breakout": ORBBreakout(), "rsi_momentum": RSIMomentum(),
             "vwap_breakout": VWAPBreakout(),
         }
-        self._feed            = SimulatedFeed(WATCH_SYMBOLS, BASE_PRICES)
+        self._feed            = feed or SimulatedFeed(WATCH_SYMBOLS, BASE_PRICES)
         self._regime          = Regime.UNKNOWN
         self._regime_features: dict = {}
         self._allocations: dict[str, float] = {}
@@ -472,6 +473,26 @@ async def _handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+def _build_feed(cfg: dict):
+    """
+    Return DhanFeed if credentials are present, else SimulatedFeed.
+    Always uses PaperBroker — no real orders are placed either way.
+    """
+    client_id    = cfg.get("dhan_client_id", "").strip()
+    access_token = cfg.get("dhan_access_token", "").strip()
+
+    if client_id and access_token:
+        try:
+            from core.feeds.dhan_feed import DhanFeed
+            logger.info("Dhan credentials found — using live market feed (paper orders)")
+            return DhanFeed(client_id, access_token, WATCH_SYMBOLS)
+        except Exception as exc:
+            logger.warning("Could not load DhanFeed (%s) — falling back to SimulatedFeed", exc)
+
+    logger.info("No Dhan credentials — using SimulatedFeed")
+    return SimulatedFeed(WATCH_SYMBOLS, BASE_PRICES)
+
+
 async def main() -> None:
     global _engine
 
@@ -484,12 +505,14 @@ async def main() -> None:
     pathlib.Path(cfg["intent_log_path"]).parent.mkdir(parents=True, exist_ok=True)
     pathlib.Path(cfg["pnl_db_path"]).parent.mkdir(parents=True, exist_ok=True)
 
+    feed = _build_feed(cfg)
     _engine = JarvisEngine(
         initial_capital=cfg["initial_capital"],
         kill_switch_amount=cfg["initial_capital"] * cfg["kill_switch_pct"],
         kelly_fraction=cfg["kelly_fraction"],
         intent_log_path=cfg["intent_log_path"],
         pnl_db_path=cfg["pnl_db_path"],
+        feed=feed,
     )
     await _engine.start()
 
