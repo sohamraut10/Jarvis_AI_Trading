@@ -192,12 +192,20 @@ class JarvisEngine:
         self._signal_dedup: dict[str, datetime] = {}
         self._running = False
         self._tasks: list[asyncio.Task] = []
+        self._tick_count = 0
 
     async def start(self) -> None:
         await self._pnl_tracker.init()
         self._running = True
+        feed_type = type(self._feed).__name__
+        logger.info("=" * 55)
+        logger.info("  JARVIS ENGINE STARTED  [feed=%s]", feed_type)
+        logger.info("  Strategies : %s", ", ".join(self._strategies.keys()))
+        logger.info("  Symbols    : %s", ", ".join(WATCH_SYMBOLS))
+        logger.info("  Capital    : ₹%.0f", self._broker._initial_capital if hasattr(self._broker, '_initial_capital') else 0)
+        logger.info("=" * 55)
         self._tasks.append(asyncio.create_task(self._feed.start(self._on_tick)))
-        logger.info("JarvisEngine started")
+        self._tasks.append(asyncio.create_task(self._heartbeat_loop()))
 
     async def stop(self) -> None:
         self._running = False
@@ -205,18 +213,53 @@ class JarvisEngine:
         for t in self._tasks:
             t.cancel()
 
+    async def _heartbeat_loop(self) -> None:
+        """Log a status summary every 5 minutes."""
+        await asyncio.sleep(30)  # first beat after 30s
+        while self._running:
+            try:
+                pnl   = await self._broker.get_daily_pnl()
+                cap   = await self._broker.get_available_capital()
+                pos   = getattr(self._broker, '_positions', {})
+                ticks = self._tick_count
+                ltp   = {s: round(v, 2) for s, v in self._broker._ltp.items()}
+                logger.info("─" * 55)
+                logger.info("  HEARTBEAT  ticks=%d  regime=%s", ticks, str(self._regime).replace("Regime.", ""))
+                logger.info("  Daily P&L  : ₹%.2f   available: ₹%.0f", pnl, cap)
+                logger.info("  Prices     : %s", "  ".join(f"{s}={p}" for s, p in ltp.items()))
+                if pos:
+                    for sym, p in pos.items():
+                        logger.info("  Position   : %s  qty=%s  entry=₹%s",
+                                    sym,
+                                    getattr(p, 'qty', '?'),
+                                    getattr(p, 'avg_price', '?'))
+                else:
+                    logger.info("  Positions  : none open")
+                logger.info("─" * 55)
+            except Exception as exc:
+                logger.warning("heartbeat error: %s", exc)
+            await asyncio.sleep(300)  # every 5 min
+
     async def _on_tick(self, symbol: str, ltp: float, volume: float) -> None:
         if not self._running:
             return
         try:
+            self._tick_count += 1
             await self._broker.update_ltp(symbol, ltp)
             self._close_history[symbol].append(ltp)
+            # Log feed alive every 500 ticks (~50s with SimulatedFeed)
+            if self._tick_count % 500 == 0:
+                logger.info("feed alive  ticks=%d  %s=₹%.2f", self._tick_count, symbol, ltp)
             for bar in self._aggregator.update(symbol, ltp, volume, datetime.utcnow()):
                 await self._on_bar(bar)
         except Exception as exc:
             logger.error("tick error %s: %s", symbol, exc)
 
     async def _on_bar(self, bar: Bar) -> None:
+        logger.debug("bar  %s %s  O=%.2f H=%.2f L=%.2f C=%.2f  vol=%d",
+                     bar.timeframe, bar.symbol,
+                     bar.open, bar.high, bar.low, bar.close, bar.volume)
+
         self._bars_since_reclassify += 1
         if bar.timeframe == "5min" and self._bars_since_reclassify >= REGIME_RECLASSIFY_BARS:
             self._bars_since_reclassify = 0
@@ -225,17 +268,29 @@ class JarvisEngine:
             self._regime = self._regime_clf.predict_from_closes(closes)
             self._regime_features = self._regime_clf.feature_dict()
             self._feed.set_regime(self._regime)
+            regime_name = str(self._regime).replace("Regime.", "")
             if old != self._regime:
+                logger.info("REGIME CHANGE  %s → %s  (trigger: %s)",
+                            str(old).replace("Regime.", ""), regime_name, bar.symbol)
                 await self._intent_logger.log_regime_change(str(old), str(self._regime), self._regime_features)
                 await self._recompute_allocations()
+            else:
+                logger.info("regime check  still %s  (%s bars until next)", regime_name, REGIME_RECLASSIFY_BARS)
+
         for sid in _TF_MAP.get(bar.timeframe, []):
             strat = self._strategies.get(sid)
-            if strat is None or not strat.is_active(self._regime):
+            if strat is None:
+                continue
+            if not strat.is_active(self._regime):
+                logger.debug("strategy %s skipped (not active in %s)", sid, self._regime)
                 continue
             try:
+                logger.debug("scanning  %s  on  %s %s", sid, bar.timeframe, bar.symbol)
                 sig = strat.on_bar(bar)
                 if sig:
                     await self._on_signal(sig, strat)
+                else:
+                    logger.debug("no signal  %s %s", sid, bar.symbol)
             except Exception as exc:
                 logger.error("strategy %s error: %s", sid, exc)
 
@@ -244,26 +299,48 @@ class JarvisEngine:
         now = datetime.utcnow()
         last = self._signal_dedup.get(key)
         if last and (now - last).total_seconds() < SIGNAL_DEDUP_SECONDS:
+            logger.debug("signal deduped  %s (last: %ds ago)",
+                         key, int((now - last).total_seconds()))
             return
         self._signal_dedup[key] = now
+
+        logger.info(">> SIGNAL  %s  %s %s @ ₹%.2f  conf=%.0f%%  R/R=%.1f  [%s]",
+                    signal.strategy_id, signal.side.value, signal.symbol,
+                    signal.entry_price or 0, (signal.confidence or 0) * 100,
+                    signal.risk_reward or 0, signal.reason or "")
+
         ltp = self._broker.get_ltp(signal.symbol)
         if ltp is None:
+            logger.warning("signal dropped — no LTP for %s", signal.symbol)
             return
+
         available = await self._broker.get_available_capital()
         stats = strategy.get_stats()
         qty = self._kelly_sizer.size(stats, ltp, available)
         if qty == 0:
+            logger.info("   Kelly → qty=0  (win_rate=%.0f%%  n=%d  available=₹%.0f) — no trade",
+                        (stats.win_rate or 0) * 100, stats.sample_size or 0, available)
             return
+
         kelly_explain = self._kelly_sizer.explain(stats, ltp, available)
+        logger.info("   Kelly → qty=%d  (₹%.0f exposure)", qty, qty * ltp)
+
         side = OrderSide.BUY if signal.side == SignalSide.BUY else OrderSide.SELL
         order = Order(symbol=signal.symbol, side=side, order_type=OrderType.MARKET,
                       qty=qty, product=ProductType.INTRADAY, strategy_id=signal.strategy_id)
         decision = await self._risk_manager.check(order, ltp, signal.strategy_id)
         await self._intent_logger.log_signal(signal, str(self._regime), kelly_explain)
         await self._intent_logger.log_order(order, decision, str(self._regime))
+
         if decision.approved and not self._broker.is_killed():
             order.qty = decision.adjusted_qty
             await self._broker.place_order(order)
+            logger.info("   PAPER ORDER PLACED  %s %d %s @ ₹%.2f  (paper)",
+                        side.value, order.qty, signal.symbol, ltp)
+        else:
+            reason = "kill switch active" if self._broker.is_killed() else getattr(decision, 'reason', 'risk gate')
+            logger.info("   ORDER REJECTED  reason=%s", reason)
+
         self._recent_signals.append({
             "ts": signal.timestamp.isoformat(), "strategy": signal.strategy_id,
             "symbol": signal.symbol, "side": signal.side.value,
@@ -277,6 +354,8 @@ class JarvisEngine:
         available = await self._broker.get_available_capital()
         result = self._shift_engine.compute_allocations(list(self._strategies.values()), self._regime, available)
         self._allocations = result.allocations
+        logger.info("allocations recomputed  %s",
+                    "  ".join(f"{k}={v:.0%}" for k, v in result.allocations.items() if v > 0))
         await self._intent_logger.log_allocation(result)
 
     def snapshot(self) -> dict:
@@ -292,7 +371,7 @@ class JarvisEngine:
         daily_pnl = await self._broker.get_daily_pnl()
         await self._broker.square_off_all()
         await self._intent_logger.log_kill_switch(daily_pnl, 0.0)
-        logger.critical("MANUAL KILL-SWITCH triggered")
+        logger.critical("!!! MANUAL KILL-SWITCH TRIGGERED  daily_pnl=₹%.2f !!!", daily_pnl)
 
 # ── Module-level state ────────────────────────────────────────────────────────
 
@@ -303,7 +382,7 @@ _ws_clients: set = set()
 
 async def _ws_handler(websocket) -> None:
     _ws_clients.add(websocket)
-    logger.info("WS connected (total=%d)", len(_ws_clients))
+    logger.info("dashboard connected  clients=%d", len(_ws_clients))
     try:
         if _engine:
             await websocket.send(json.dumps(_engine.snapshot()))
@@ -519,7 +598,8 @@ async def main() -> None:
     ws_srv   = await websockets.serve(_ws_handler, "0.0.0.0", WS_PORT)
     http_srv = await asyncio.start_server(_handle_http, "0.0.0.0", HTTP_PORT)
 
-    logger.info("JARVIS Termux server ready — WS:%d  HTTP:%d", WS_PORT, HTTP_PORT)
+    logger.info("JARVIS Termux server ready  WS=%d  HTTP=%d  feed=%s",
+                WS_PORT, HTTP_PORT, type(feed).__name__)
     asyncio.create_task(_broadcast_loop())
 
     try:
