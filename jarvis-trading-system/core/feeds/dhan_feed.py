@@ -121,6 +121,11 @@ class DhanFeed:
             _asyncio.set_event_loop(thread_loop)
             thread_loop.run_until_complete(self._connect_loop(sec_ids, _on_tick))
             logger.info("[Dhan] feed thread exiting")
+            # If we never received a tick, trigger fallback on the main loop
+            if self.ticks_received == 0 and self._running:
+                asyncio.run_coroutine_threadsafe(
+                    self._fallback(tick_callback), loop
+                )
 
         loop.run_in_executor(None, _run)
 
@@ -157,10 +162,14 @@ class DhanFeed:
             ],
         })
 
-        attempt = 0
+        _MAX_FAST_FAILS = 3   # give up on Dhan after this many instant-drops
+
+        attempt        = 0
+        fast_fails     = 0   # attempts that dropped < 2 s after subscribing
         while self._running:
             attempt += 1
             logger.info("[Dhan] connect attempt #%d", attempt)
+            connect_ok = False
             try:
                 async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
                     self.connected    = True
@@ -178,6 +187,7 @@ class DhanFeed:
 
                     await ws.send(sub_msg)
                     logger.info("[Dhan] subscription sent — waiting for ticks…")
+                    sub_time = time.time()
 
                     while self._running:
                         try:
@@ -190,6 +200,8 @@ class DhanFeed:
                             logger.info("[Dhan] text from server: %s", data[:300])
                             continue
 
+                        connect_ok = True   # we received at least one frame
+                        fast_fails = 0
                         tick = _parse_tick(data)
                         if tick is None:
                             continue
@@ -206,7 +218,6 @@ class DhanFeed:
             except Exception as exc:
                 was = self.connected
                 self.connected = False
-                # Try to surface the WebSocket close reason
                 close_info = ""
                 if hasattr(exc, 'rcvd') and exc.rcvd:
                     close_info = f"  ws_code={exc.rcvd.code}  reason={exc.rcvd.reason!r}"
@@ -214,11 +225,27 @@ class DhanFeed:
                     close_info = f"  code={exc.code}"
                 uptime = ""
                 if was and self.connect_time:
-                    uptime = f"  uptime={time.time()-self.connect_time:.0f}s"
+                    elapsed = time.time() - self.connect_time
+                    uptime  = f"  uptime={elapsed:.0f}s"
+                    if not connect_ok and elapsed < 2:
+                        fast_fails += 1
                 logger.error("[Dhan] disconnected: %s%s%s", exc, close_info, uptime)
 
             if not self._running:
                 break
+
+            # Give up after repeated instant-drops — likely a missing subscription
+            if fast_fails >= _MAX_FAST_FAILS:
+                logger.error(
+                    "[Dhan] *** giving up after %d instant disconnects ***\n"
+                    "  The Dhan server drops the connection immediately after subscription.\n"
+                    "  Most likely cause: Live Market Feed API not enabled on your account.\n"
+                    "  Fix: Dhan app → My Profile → API Access → enable 'Live Market Feed'\n"
+                    "  Then restart JARVIS with a fresh access token.\n"
+                    "  Falling back to SimulatedFeed for now.",
+                    fast_fails,
+                )
+                return   # caller's _run() will exit; start() will detect no ticks
 
             wait = min(10 * attempt, 60)
             logger.warning("[Dhan] retrying in %ds (attempt #%d done)", wait, attempt)
