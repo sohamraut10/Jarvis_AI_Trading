@@ -407,15 +407,21 @@ async def _broadcast_loop() -> None:
     interval = BROADCAST_INTERVAL_MS / 1000.0
     while True:
         await asyncio.sleep(interval)
-        if _engine and _ws_clients:
-            payload = json.dumps(_engine.snapshot())
-            dead = set()
-            for ws in _ws_clients:
-                try:
-                    await ws.send(payload)
-                except Exception:
-                    dead.add(ws)
+        if not _engine or not _ws_clients:
+            continue
+        payload = json.dumps(_engine.snapshot())
+        dead: set = set()
+        for ws in list(_ws_clients):
+            try:
+                await ws.send(payload)
+            except websockets.exceptions.ConnectionClosed:
+                dead.add(ws)
+            except Exception as exc:
+                logger.debug("broadcast send error (removing client): %s", exc)
+                dead.add(ws)
+        if dead:
             _ws_clients -= dead
+            logger.debug("removed %d stale WS client(s)", len(dead))
 
 # ── HTTP API server ───────────────────────────────────────────────────────────
 
@@ -595,7 +601,12 @@ async def main() -> None:
     )
     await _engine.start()
 
-    ws_srv   = await websockets.serve(_ws_handler, "0.0.0.0", WS_PORT)
+    ws_srv   = await websockets.serve(
+        _ws_handler, "0.0.0.0", WS_PORT,
+        ping_interval=20,   # send a ping every 20s to keep Vite proxy alive
+        ping_timeout=10,    # close if no pong within 10s
+        close_timeout=5,
+    )
     http_srv = await asyncio.start_server(_handle_http, "0.0.0.0", HTTP_PORT)
 
     logger.info("JARVIS Termux server ready  WS=%d  HTTP=%d  feed=%s",
