@@ -333,17 +333,16 @@ CURRENCY_PAIRS = ["USDINR", "EURINR", "GBPINR", "JPYINR"]
 def build_instrument_map(
     equity_symbols: list[str],
     currency_symbols: list[str],
+    commodity_symbols: Optional[list[str]] = None,
 ) -> dict[str, tuple[str, str, int]]:
     """
     Build symbol → (exchange_segment, security_id, lot_size) map.
     Uses scrip master if loaded, falls back to static equity IDs + currency search.
     """
     result: dict[str, tuple[str, str, int]] = {}
+    commodity_symbols = commodity_symbols or []
 
     if _scrip_master.is_loaded():
-        # Use scrip master for everything
-        today = datetime.today().date()
-
         for sym in equity_symbols:
             hits = _scrip_master.search(sym, segments=["NSE_EQ"], limit=5)
             exact = next((h for h in hits if h["symbol"] == sym and h["instrument_type"] == "EQ"), None)
@@ -367,6 +366,18 @@ def build_instrument_map(
             else:
                 logger.warning("[Instruments] no near-month contract for %s", pair)
 
+        for sym in commodity_symbols:
+            hits = _scrip_master.search(sym, segments=["MCX_COMM"], limit=20)
+            futures = [h for h in hits if h["instrument_type"] == "FUTCOM" and h["expiry"]]
+            futures.sort(key=lambda h: h["expiry"])
+            if futures:
+                f = futures[0]
+                result[sym] = (f["segment"], f["security_id"], f["lot_size"])
+                logger.info("[Instruments] %s (MCX) → sid=%s  expiry=%s  lot=%d",
+                            sym, f["security_id"], f["expiry"], f["lot_size"])
+            else:
+                logger.warning("[Instruments] no near-month MCX contract for %s", sym)
+
     else:
         # Fallback: static equity IDs + raw currency CSV fetch
         for sym in equity_symbols:
@@ -375,14 +386,68 @@ def build_instrument_map(
                 result[sym] = (seg, sid, 1)
 
         if currency_symbols:
-            from datetime import date
-            today = date.today()
             for pair in currency_symbols:
                 hits = _raw_currency_search(pair)
                 if hits:
                     result[pair] = hits[0]
 
+        if commodity_symbols:
+            for sym in commodity_symbols:
+                hits = _raw_commodity_search(sym)
+                if hits:
+                    result[sym] = hits[0]
+
     return result
+
+
+def _raw_commodity_search(sym: str) -> list[tuple[str, str, int]]:
+    """Minimal fallback: find near-month MCX FUTCOM contract from scrip master CSV."""
+    import requests
+    try:
+        resp = requests.get(_SCRIP_MASTER_URL, timeout=20)
+        resp.raise_for_status()
+        today = datetime.today().date()
+        reader = csv.DictReader(io.StringIO(resp.text))
+        headers = list(reader.fieldnames or [])
+        col = _resolve_cols(headers)
+        c_sid   = col("SEM_SMST_SECURITY_ID", "ScrpCd")
+        c_sym   = col("SEM_TRADING_SYMBOL",   "TckrSymb")
+        c_seg   = col("SEM_SEGMENT",          "Sgmt")
+        c_instr = col("SEM_INSTRUMENT_NAME",  "FinInstrmTp")
+        c_exp   = col("SEM_EXPIRY_DATE",      "XpryDt")
+        c_lot   = col("SEM_LOT_UNITS",        "LotSz")
+        best = None
+        best_exp = None
+        for row in reader:
+            seg   = (row.get(c_seg)   or "").strip().upper()
+            instr = (row.get(c_instr) or "").strip().upper()
+            tsym  = (row.get(c_sym)   or "").strip()
+            sid   = (row.get(c_sid)   or "").strip()
+            exp_s = (row.get(c_exp)   or "").strip()
+            lot_s = (row.get(c_lot)   or "1").strip()
+            if "MCX" not in seg or instr != "FUTCOM":
+                continue
+            if not tsym.startswith(sym):
+                continue
+            if not sid:
+                continue
+            try:
+                exp = datetime.strptime(exp_s[:10], "%Y-%m-%d").date()
+            except Exception:
+                continue
+            if exp < today:
+                continue
+            if best_exp is None or exp < best_exp:
+                best_exp = exp
+                try:
+                    lot = int(float(lot_s))
+                except Exception:
+                    lot = 1
+                best = ("MCX_COMM", sid, lot)
+        return [best] if best else []
+    except Exception as exc:
+        logger.error("[Instruments] fallback commodity search failed: %s", exc)
+        return []
 
 
 def _raw_currency_search(pair: str) -> list[tuple[str, str, int]]:

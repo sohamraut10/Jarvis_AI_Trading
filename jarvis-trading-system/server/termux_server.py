@@ -77,11 +77,16 @@ HTTP_PORT = 8766
 WATCH_SYMBOLS: list[str] = []   # no equities — currency auto-discovery mode
 # All 4 NSE currency pairs — feed detects which are actually live
 CURRENCY_SYMBOLS: list[str] = ["USDINR", "EURINR", "GBPINR", "JPYINR"]
+# Popular MCX commodities — near-month futures resolved via scrip master
+MCX_SYMBOLS: list[str] = ["CRUDEOIL", "GOLD", "SILVER", "NATURALGAS", "COPPER"]
 BASE_PRICES: dict[str, float] = {
     "RELIANCE": 2500.0, "TCS": 3800.0, "INFY": 1500.0,
     "HDFCBANK": 1700.0, "SBIN": 800.0,
     # Currency pair base prices (INR per unit, used only by SimulatedFeed)
     "USDINR": 84.0, "EURINR": 90.0, "GBPINR": 105.0, "JPYINR": 0.55,
+    # MCX commodity base prices (INR per lot unit, SimulatedFeed only)
+    "CRUDEOIL": 6500.0, "GOLD": 72000.0, "SILVER": 88000.0,
+    "NATURALGAS": 230.0, "COPPER": 780.0,
 }
 _TF_MAP: dict[str, list[str]] = {
     "1min": ["vwap_breakout"],
@@ -453,7 +458,10 @@ class JarvisEngine:
             for s in syms:
                 scanner[s] = {"status": "live", "ticks": self._tick_count,
                                "ltp": self._feed.current_price(s),
-                               "last_tick_ago": 1.0, "is_currency": s.endswith("INR")}
+                               "last_tick_ago": 1.0,
+                               "is_currency":  s.endswith("INR"),
+                               "is_commodity": s in MCX_SYMBOLS,
+                               "exchange":     "MCX" if s in MCX_SYMBOLS else ("NSE_CURR" if s.endswith("INR") else "NSE")}
         return {
             "type": "snapshot", "ts": _utcnow().isoformat(),
             "regime": str(self._regime), "regime_features": self._regime_features,
@@ -832,16 +840,18 @@ def _build_feed(cfg: dict):
     if client_id and access_token:
         try:
             from core.feeds.dhan_feed import DhanFeed
-            all_syms = WATCH_SYMBOLS + CURRENCY_SYMBOLS
             logger.info("Dhan credentials found — using live market feed (paper orders)")
             if CURRENCY_SYMBOLS:
-                logger.info("Currency pairs enabled: %s", ", ".join(CURRENCY_SYMBOLS))
+                logger.info("Currency pairs: %s", ", ".join(CURRENCY_SYMBOLS))
+            if MCX_SYMBOLS:
+                logger.info("MCX commodities: %s", ", ".join(MCX_SYMBOLS))
             return DhanFeed(client_id, access_token, WATCH_SYMBOLS,
-                            currency_symbols=CURRENCY_SYMBOLS or None)
+                            currency_symbols=CURRENCY_SYMBOLS or None,
+                            commodity_symbols=MCX_SYMBOLS or None)
         except Exception as exc:
             logger.warning("Could not load DhanFeed (%s) — falling back to SimulatedFeed", exc)
 
-    all_syms = WATCH_SYMBOLS + CURRENCY_SYMBOLS
+    all_syms = WATCH_SYMBOLS + CURRENCY_SYMBOLS + MCX_SYMBOLS
     logger.info("No Dhan credentials — using SimulatedFeed")
     return SimulatedFeed(all_syms, BASE_PRICES)
 
@@ -860,6 +870,8 @@ async def main() -> None:
         WATCH_SYMBOLS = cfg["watch_symbols"]
     if "currency_symbols" in cfg:
         CURRENCY_SYMBOLS = cfg["currency_symbols"]
+    if "mcx_symbols" in cfg:
+        MCX_SYMBOLS = cfg["mcx_symbols"]
 
     pathlib.Path(cfg["intent_log_path"]).parent.mkdir(parents=True, exist_ok=True)
     pathlib.Path(cfg["pnl_db_path"]).parent.mkdir(parents=True, exist_ok=True)

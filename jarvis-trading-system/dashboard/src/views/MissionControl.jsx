@@ -99,8 +99,9 @@ function MarketScanner({ scanner, connected, onSearchOpen }) {
   const totalCount  = allEntries.length;
 
   // Only render pairs that are actually receiving ticks right now
-  const currency = liveEntries.filter(([, d]) =>  d.is_currency);
-  const equities = liveEntries.filter(([, d]) => !d.is_currency);
+  const currency    = liveEntries.filter(([, d]) =>  d.is_currency);
+  const commodities = liveEntries.filter(([, d]) =>  d.is_commodity && !d.is_currency);
+  const equities    = liveEntries.filter(([, d]) => !d.is_currency && !d.is_commodity);
 
   return (
     <div className="bg-gray-900 border border-gray-800 rounded p-4">
@@ -163,8 +164,18 @@ function MarketScanner({ scanner, connected, onSearchOpen }) {
               ))}
             </>
           )}
-          {equities.length > 0 && (
+          {commodities.length > 0 && (
             <div className={currency.length ? "mt-3" : ""}>
+              <div className="text-[9px] text-gray-700 uppercase tracking-widest mb-1">
+                Commodities · MCX
+              </div>
+              {commodities.map(([sym, data]) => (
+                <PairRow key={sym} sym={sym} data={data} flash={flash[sym]} />
+              ))}
+            </div>
+          )}
+          {equities.length > 0 && (
+            <div className={(currency.length || commodities.length) ? "mt-3" : ""}>
               <div className="text-[9px] text-gray-700 uppercase tracking-widest mb-1">
                 Equities
               </div>

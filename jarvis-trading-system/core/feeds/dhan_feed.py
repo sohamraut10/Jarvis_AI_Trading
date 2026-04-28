@@ -68,12 +68,14 @@ class DhanFeed:
         access_token: str,
         symbols: list[str],
         currency_symbols: Optional[list[str]] = None,
+        commodity_symbols: Optional[list[str]] = None,
     ) -> None:
         self._client_id    = client_id
         self._access_token = access_token
         self._eq_symbols   = symbols
         self._curr_symbols = currency_symbols or []
-        self._all_symbols  = symbols + (currency_symbols or [])
+        self._comm_symbols = commodity_symbols or []
+        self._all_symbols  = symbols + (currency_symbols or []) + (commodity_symbols or [])
         self._ltp: dict[str, float] = {}
         self._running      = False
 
@@ -120,12 +122,19 @@ class DhanFeed:
             else:
                 status = "offline"
 
+            info     = self._instrument_info.get(sym, {})
+            seg      = info.get("segment", "")
+            is_comm  = seg == "MCX_COMM"
+            is_curr  = sym.endswith("INR") and not is_comm
+            exchange = "MCX" if is_comm else ("NSE_CURR" if is_curr else "NSE")
             result[sym] = {
-                "status":       status,
-                "ticks":        ticks,
-                "ltp":          round(ltp, 4) if ltp else None,
+                "status":        status,
+                "ticks":         ticks,
+                "ltp":           round(ltp, 4) if ltp else None,
                 "last_tick_ago": round(idle, 1) if idle is not None else None,
-                "is_currency":  sym.endswith("INR"),
+                "is_currency":   is_curr,
+                "is_commodity":  is_comm,
+                "exchange":      exchange,
             }
         return result
 
@@ -161,7 +170,7 @@ class DhanFeed:
 
         # Run synchronously in thread pool to avoid blocking the event loop
         instrument_map = await loop.run_in_executor(
-            None, build_instrument_map, self._eq_symbols, self._curr_symbols
+            None, build_instrument_map, self._eq_symbols, self._curr_symbols, self._comm_symbols
         )
 
         if not instrument_map:
