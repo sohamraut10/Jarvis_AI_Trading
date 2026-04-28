@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import PnLPanel from "../components/PnLPanel";
 import PositionTable from "../components/PositionTable";
 import SignalLog from "../components/SignalLog";
@@ -40,6 +41,70 @@ function HealthTile({ snapshot, connected }) {
   );
 }
 
+function PriceTicker({ ltp }) {
+  const prevRef = useRef({});
+  const [flash, setFlash] = useState({});
+
+  useEffect(() => {
+    if (!ltp) return;
+    const next = {};
+    Object.entries(ltp).forEach(([sym, price]) => {
+      const prev = prevRef.current[sym];
+      if (prev !== undefined && prev !== price) {
+        next[sym] = price > prev ? "up" : "down";
+      }
+    });
+    if (Object.keys(next).length) {
+      setFlash(next);
+      const t = setTimeout(() => setFlash({}), 600);
+      return () => clearTimeout(t);
+    }
+    prevRef.current = { ...ltp };
+  }, [ltp]);
+
+  if (!ltp || !Object.keys(ltp).length) return null;
+
+  const isCurr  = (s) => s.endsWith("INR");
+  const equity   = Object.entries(ltp).filter(([s]) => !isCurr(s));
+  const currency = Object.entries(ltp).filter(([s]) =>  isCurr(s));
+
+  const PriceRow = ({ sym, price }) => {
+    const dir = flash[sym];
+    return (
+      <div className="flex justify-between items-center py-1 border-b border-gray-800/30">
+        <span className="text-[10px] text-gray-500 font-mono">{sym}</span>
+        <span className={[
+          "text-xs font-mono font-bold tabular-nums transition-colors duration-300",
+          dir === "up"   ? "text-green-400" :
+          dir === "down" ? "text-red-400"   : "text-gray-200",
+        ].join(" ")}>
+          {isCurr(sym) ? price.toFixed(4) : `₹${price.toFixed(2)}`}
+          {dir === "up"   && " ▲"}
+          {dir === "down" && " ▼"}
+        </span>
+      </div>
+    );
+  };
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded p-4">
+      <div className="text-[10px] text-gray-500 tracking-widest uppercase mb-3">Live Prices</div>
+      {equity.length > 0 && (
+        <>
+          <div className="text-[9px] text-gray-700 uppercase tracking-widest mb-1">Equities</div>
+          {equity.map(([sym, price]) => <PriceRow key={sym} sym={sym} price={price} />)}
+        </>
+      )}
+      {currency.length > 0 && (
+        <div className={equity.length ? "mt-3" : ""}>
+          <div className="text-[9px] text-gray-700 uppercase tracking-widest mb-1">Currency Futures</div>
+          {currency.map(([sym, price]) => <PriceRow key={sym} sym={sym} price={price} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function MissionControl({ snapshot, pnlHistory, signals, connected }) {
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 p-4">
@@ -54,6 +119,7 @@ export default function MissionControl({ snapshot, pnlHistory, signals, connecte
       </div>
       {/* right 1/3 */}
       <div className="flex flex-col gap-4">
+        <PriceTicker ltp={snapshot?.ltp} />
         <StrategyRanks snapshot={snapshot} />
         <HealthTile snapshot={snapshot} connected={connected} />
       </div>

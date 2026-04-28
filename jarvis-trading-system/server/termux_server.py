@@ -330,7 +330,9 @@ class JarvisEngine:
 
         available = await self._broker.get_available_capital()
         stats = strategy.get_stats()
-        qty = self._kelly_sizer.size(stats, ltp, available)
+        # Currency futures trade in lots of 1000 units minimum
+        lot_size = 1000 if signal.symbol.endswith("INR") else 1
+        qty = self._kelly_sizer.size(stats, ltp, available, lot_size=lot_size)
         if qty == 0:
             logger.info("   Kelly → qty=0  (win_rate=%.0f%%  n=%d  available=₹%.0f) — no trade",
                         (stats.win_rate or 0) * 100, stats.sample_size or 0, available)
