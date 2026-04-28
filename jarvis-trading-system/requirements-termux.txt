@@ -1,33 +1,29 @@
-# Termux-compatible requirements (no torch/SB3 — RL retraining disabled,
-# all paper-trading features work normally)
+# Termux-compatible requirements
+# numpy must be installed via pkg BEFORE this file:
+#   pkg install python-numpy
+#
+# RL retraining (torch/SB3) is not available on ARM — all paper-trading
+# features work normally without it.
 
 # ── Core API & async ──────────────────────────────────────────────────────────
 fastapi==0.111.0
 fastapi-cli==0.0.5
-uvicorn==0.29.0          # no [standard] extra — avoids uvloop/httptools C deps
+uvicorn==0.29.0
 websockets==12.0
 httpx==0.27.0
 python-dotenv==1.0.1
 pydantic==2.7.1
 pydantic-settings==2.2.1
 
-# ── Dhan broker SDK ───────────────────────────────────────────────────────────
-dhanhq==2.0.1
-
-# ── Numerical / ML (numpy installed via pkg, rest from pip) ───────────────────
-pandas==2.2.2
-scipy==1.13.0
-scikit-learn==1.4.2
-hmmlearn==0.3.2
-
-# ── Async / scheduling ────────────────────────────────────────────────────────
+# ── Async / scheduling / persistence ─────────────────────────────────────────
 apscheduler==3.10.4
 aiofiles==23.2.1
-
-# ── Persistence & logging ─────────────────────────────────────────────────────
-sqlalchemy==2.0.30
 aiosqlite==0.20.0
+sqlalchemy==2.0.30
 structlog==24.1.0
 
-# ── AI layer (optuna only — no torch/gym/SB3 on ARM) ─────────────────────────
+# ── HMM regime classifier (optional — pure fallback if it won't compile) ─────
+hmmlearn==0.3.2
+
+# ── Bayesian optimizer (pure Python) ─────────────────────────────────────────
 optuna==3.6.1
