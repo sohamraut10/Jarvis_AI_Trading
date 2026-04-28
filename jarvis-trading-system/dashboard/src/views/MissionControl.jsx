@@ -1,10 +1,27 @@
-import { useEffect, useRef, useState } from "react";
+import { Component, useEffect, useRef, useState } from "react";
 import IntelligencePanel from "../components/IntelligencePanel";
 import PnLPanel from "../components/PnLPanel";
 import PositionTable from "../components/PositionTable";
 import SignalLog from "../components/SignalLog";
 import StrategyRanks from "../components/StrategyRanks";
 import { formatCurrency } from "../lib/utils";
+
+// ── Error boundary ────────────────────────────────────────────────────────────
+
+class PanelBoundary extends Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(e) { return { error: e }; }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="bg-gray-900 border border-red-900/60 rounded p-3 text-xs text-red-400 font-mono">
+          ⚠ {this.props.label ?? "Panel"} error: {this.state.error.message}
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 // ── Market Scanner ────────────────────────────────────────────────────────────
 
@@ -245,19 +262,33 @@ export default function MissionControl({ snapshot, pnlHistory, signals, connecte
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 p-4">
       {/* left 2/3 */}
       <div className="lg:col-span-2 flex flex-col gap-4">
-        <PnLPanel
-          pnlHistory={pnlHistory.length ? pnlHistory : [{ t: "—", pnl: 0 }]}
-          snapshot={snapshot}
-        />
-        <PositionTable snapshot={snapshot} />
-        <SignalLog signals={signals} />
+        <PanelBoundary label="PnL Chart">
+          <PnLPanel
+            pnlHistory={pnlHistory.length ? pnlHistory : [{ t: "—", pnl: 0 }]}
+            snapshot={snapshot}
+          />
+        </PanelBoundary>
+        <PanelBoundary label="Positions">
+          <PositionTable snapshot={snapshot} />
+        </PanelBoundary>
+        <PanelBoundary label="Signal Log">
+          <SignalLog signals={signals} />
+        </PanelBoundary>
       </div>
       {/* right 1/3 */}
       <div className="flex flex-col gap-4">
-        <IntelligencePanel snapshot={snapshot} />
-        <MarketScanner scanner={snapshot?.scanner} connected={connected} onSearchOpen={onSearchOpen} />
-        <StrategyRanks snapshot={snapshot} />
-        <HealthTile snapshot={snapshot} connected={connected} />
+        <PanelBoundary label="AI Pair Selector">
+          <IntelligencePanel snapshot={snapshot} />
+        </PanelBoundary>
+        <PanelBoundary label="Market Scanner">
+          <MarketScanner scanner={snapshot?.scanner} connected={connected} onSearchOpen={onSearchOpen} />
+        </PanelBoundary>
+        <PanelBoundary label="Strategy Ranks">
+          <StrategyRanks snapshot={snapshot} />
+        </PanelBoundary>
+        <PanelBoundary label="System Health">
+          <HealthTile snapshot={snapshot} connected={connected} />
+        </PanelBoundary>
       </div>
     </div>
   );

@@ -434,8 +434,18 @@ class DhanFeed:
     async def _fallback(self, tick_callback: Callable) -> None:
         logger.info("[Dhan] switching to SimulatedFeed")
         from core.feeds.simulated_feed import SimulatedFeed
+
+        # Wrap tick callback so DhanFeed scanner state updates → pairs show as "live"
+        async def _tick_and_track(sym: str, ltp: float, vol: float) -> None:
+            now = time.time()
+            self._ltp[sym]           = ltp
+            self._sym_ltp[sym]       = ltp
+            self._sym_ticks[sym]     = self._sym_ticks.get(sym, 0) + 1
+            self._sym_last_tick[sym] = now
+            await tick_callback(sym, ltp, vol)
+
         sim = SimulatedFeed(self._all_symbols)
-        await sim.start(tick_callback)
+        await sim.start(_tick_and_track)
 
     def stop(self) -> None:
         self._running = False

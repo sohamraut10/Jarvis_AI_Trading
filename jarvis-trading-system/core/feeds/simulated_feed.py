@@ -18,8 +18,14 @@ class SimulatedFeed:
     VOL_REGIME_MULT = 3.0
 
     _BASE_PRICES: dict[str, float] = {
+        # Equities
         "RELIANCE": 2500.0, "TCS": 3800.0, "INFY": 1500.0,
         "HDFCBANK": 1700.0, "SBIN": 800.0,
+        # Currency futures (NSE)
+        "USDINR": 84.0, "EURINR": 90.0, "GBPINR": 105.0, "JPYINR": 0.55,
+        # MCX commodities
+        "CRUDEOIL": 6500.0, "GOLD": 72000.0, "SILVER": 88000.0,
+        "NATURALGAS": 230.0, "COPPER": 780.0,
     }
 
     def __init__(
@@ -28,7 +34,9 @@ class SimulatedFeed:
         base_prices: Optional[dict[str, float]] = None,
     ) -> None:
         self._symbols = symbols
-        self._prices  = dict(base_prices or {s: self._BASE_PRICES.get(s, 100.0) for s in symbols})
+        # Use provided prices if given, otherwise look up _BASE_PRICES, fallback to 100
+        provided = base_prices if base_prices is not None else {}
+        self._prices = {s: provided.get(s, self._BASE_PRICES.get(s, 100.0)) for s in symbols}
         self._running = False
         self._regime  = Regime.SIDEWAYS
 
