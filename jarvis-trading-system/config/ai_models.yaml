@@ -1,0 +1,103 @@
+# ── AI Model Registry ─────────────────────────────────────────────────────────
+# All costs are USD per MILLION tokens.
+# cache_read price applies to Gemini CachedContent API tokens only.
+
+costs_usd_per_million:
+
+  # ── Anthropic Claude ────────────────────────────────────────────────────────
+  claude-opus-4-7:
+    in: 15.00
+    out: 75.00
+
+  claude-sonnet-4-6:
+    in: 3.00
+    out: 15.00
+
+  claude-haiku-4-5-20251001:
+    in: 0.25
+    out: 1.25
+
+  # ── OpenAI GPT ──────────────────────────────────────────────────────────────
+  gpt-4o:
+    in: 5.00
+    out: 15.00
+
+  gpt-4o-mini:
+    in: 0.15
+    out: 0.60
+
+  # ── Google Gemini ───────────────────────────────────────────────────────────
+  gemini-2.5-flash-lite:
+    in: 0.10
+    out: 0.40
+    cache_read: 0.01
+
+  gemini-2.5-flash:
+    in: 0.30
+    out: 2.50
+    cache_read: 0.03
+
+  gemini-2.5-pro:
+    in: 1.25
+    out: 10.00
+    cache_read: 0.125
+
+  gemini-3.1-pro:
+    in: 2.00
+    out: 12.00
+    cache_read: 0.20
+
+
+# ── Per-step routing ──────────────────────────────────────────────────────────
+# Each step defines which model to try first, fallback on error/latency,
+# and any optional upgrade/secondary paths.
+
+routing:
+
+  scan:
+    primary: gemini-2.5-flash-lite
+    fallback: claude-haiku-4-5-20251001
+
+  shortlist:
+    primary: gemini-2.5-flash
+    fallback: claude-haiku-4-5-20251001
+
+  analyse:
+    primary: claude-sonnet-4-6
+    secondary: gemini-2.5-pro        # used when Claude latency exceeds 3 s
+    fallback: gpt-4o
+
+  decide:
+    primary: claude-sonnet-4-6
+    fallback: gpt-4o
+    opus_upgrade: claude-opus-4-7
+    # NOTE: Gemini is never used for the decide step
+
+  monitor:
+    primary: gemini-2.5-flash
+    fallback: claude-haiku-4-5-20251001
+    throttle_override: true          # may exceed budget limit for exit safety
+
+
+# ── Gemini context caching (CachedContent API) ────────────────────────────────
+# System prompts are cached for steps that call the same model repeatedly.
+# Only steps listed in enabled_steps participate; decide is excluded.
+
+gemini_cache:
+  enabled_steps: [scan, shortlist, monitor]
+  ttl_seconds: 300                   # 5-minute cache TTL
+
+
+# ── Latency thresholds (seconds) ──────────────────────────────────────────────
+latency:
+  primary_timeout: 3.0               # switch to secondary/fallback after this
+  hard_timeout: 10.0                 # total timeout before rules-only fallback
+
+
+# ── Budget ────────────────────────────────────────────────────────────────────
+budget:
+  daily_inr: 200
+  warn_fraction: 0.80
+  # Set GEMINI_FREE_TIER=true in .env to skip cost recording for Gemini
+  # during the 7-day paper trading phase (free tier: 1500 req/day on Flash).
+  free_tier_env_var: GEMINI_FREE_TIER
