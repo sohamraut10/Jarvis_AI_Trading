@@ -49,7 +49,13 @@ def _parse_tick(data: bytes) -> Optional[dict]:
         elif first_byte == 50:
             code = struct.unpack('<BHBIH', data[:10])[4]
             reason = _DISCONNECT_CODES.get(code, f"unknown code {code}")
-            logger.error("[Dhan] SERVER DISCONNECT  code=%d  %s", code, reason)
+            logger.error("[Dhan] ✗ SERVER DISCONNECT  code=%d  %s", code, reason)
+            if code in (807, 809):
+                logger.error("[Dhan]   → regenerate token: Dhan app → My Profile → Dhan API → Generate Token")
+            elif code == 806:
+                logger.error("[Dhan]   → enable 'Live Market Feed' plan in Dhan app → API Access")
+            elif code == 805:
+                logger.error("[Dhan]   → close other Dhan API sessions (max connections exceeded)")
             return None
     except Exception as exc:
         logger.debug("[Dhan] parse error  byte=%d  err=%s", first_byte, exc)
@@ -294,7 +300,11 @@ class DhanFeed:
                             continue
 
                         if isinstance(data, str):
-                            logger.info("[Dhan] server: %s", data[:300])
+                            try:
+                                msg = json.loads(data)
+                                logger.info("[Dhan] server message: %s", msg)
+                            except Exception:
+                                logger.info("[Dhan] server: %s", data[:300])
                             continue
 
                         connect_ok = True
@@ -336,10 +346,12 @@ class DhanFeed:
                 break
 
             if fast_fails >= _MAX_FAST_FAILS:
-                logger.error(
-                    "[Dhan] giving up after %d instant disconnects — "
-                    "enable 'Live Market Feed' in Dhan app → API Access. "
-                    "Falling back to SimulatedFeed.", fast_fails)
+                logger.error("[Dhan] ✗ giving up after %d instant disconnects", fast_fails)
+                logger.error("[Dhan]   possible causes:")
+                logger.error("[Dhan]   1. Token expired   → Dhan app → My Profile → Dhan API → Generate Token")
+                logger.error("[Dhan]   2. No market feed  → Dhan app → API Access → enable Live Market Feed")
+                logger.error("[Dhan]   3. Wrong client_id → check data/settings.json dhan_client_id")
+                logger.error("[Dhan]   falling back to SimulatedFeed (paper trading continues)")
                 return
 
             wait = min(10 * attempt, 60)
@@ -414,22 +426,53 @@ class DhanFeed:
 
     async def _preflight_check(self) -> None:
         import requests
-        try:
+
+        cid_masked   = self._client_id[:4] + "•" * max(0, len(self._client_id) - 4)
+        tok_masked   = self._access_token[:6] + "•" * 10 + self._access_token[-4:]
+        logger.info("[Dhan] ┌─ credential check ──────────────────────────────")
+        logger.info("[Dhan] │  client_id    : %s", cid_masked)
+        logger.info("[Dhan] │  access_token : %s  (len=%d)", tok_masked, len(self._access_token))
+
+        def _check() -> tuple[int, dict]:
             resp = requests.get(
                 "https://api.dhan.co/v2/fundlimit",
-                headers={"access-token": self._access_token,
-                         "client-id": self._client_id,
-                         "Content-Type": "application/json"},
-                timeout=8,
+                headers={
+                    "access-token":   self._access_token,
+                    "client-id":      self._client_id,
+                    "Content-Type":   "application/json",
+                },
+                timeout=10,
             )
-            if resp.status_code == 200:
-                logger.info("[Dhan] REST pre-check OK — token valid")
-            elif resp.status_code == 401:
-                logger.error("[Dhan] REST pre-check 401 — token EXPIRED → regenerate in Dhan app")
+            try:
+                body = resp.json()
+            except Exception:
+                body = {}
+            return resp.status_code, body
+
+        try:
+            loop = asyncio.get_event_loop()
+            status, body = await loop.run_in_executor(None, _check)
+
+            if status == 200:
+                avail   = body.get("availabelBalance", body.get("availableBalance", "?"))
+                used    = body.get("utilizedAmount", "?")
+                logger.info("[Dhan] │  REST check     : ✓ OK  (HTTP 200)")
+                logger.info("[Dhan] │  available bal  : ₹%s   utilised: ₹%s", avail, used)
+                logger.info("[Dhan] └─ token VALID — connecting to live feed")
+            elif status == 401:
+                logger.error("[Dhan] │  REST check     : ✗ UNAUTHORIZED (HTTP 401)")
+                logger.error("[Dhan] │  → access_token is EXPIRED or INVALID")
+                logger.error("[Dhan] │  → open Dhan app  →  My Profile  →  Dhan API  →  Generate Token")
+                logger.error("[Dhan] └─ will fall back to SimulatedFeed after WS fails")
+            elif status == 429:
+                logger.warning("[Dhan] │  REST check     : rate-limited (HTTP 429) — skipping balance check")
+                logger.info("[Dhan] └─ token may still be valid; proceeding")
             else:
-                logger.warning("[Dhan] REST pre-check HTTP %d", resp.status_code)
+                logger.warning("[Dhan] │  REST check     : HTTP %d — %s", status, str(body)[:120])
+                logger.info("[Dhan] └─ proceeding (non-fatal)")
         except Exception as exc:
-            logger.warning("[Dhan] REST pre-check skipped: %s", exc)
+            logger.warning("[Dhan] │  REST check     : skipped (%s)", exc)
+            logger.info("[Dhan] └─ network unavailable — proceeding anyway")
 
     async def _fallback(self, tick_callback: Callable) -> None:
         logger.info("[Dhan] switching to SimulatedFeed")
