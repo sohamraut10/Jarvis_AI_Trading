@@ -410,7 +410,7 @@ class JarvisEngine:
             "ts": signal.timestamp.isoformat(),
             "strategy": signal.strategy_id,
             "symbol": signal.symbol,
-            "side": str(signal.side),
+            "side": signal.side.value,
             "confidence": signal.confidence,
             "entry": signal.entry_price,
             "sl": signal.stop_loss,
