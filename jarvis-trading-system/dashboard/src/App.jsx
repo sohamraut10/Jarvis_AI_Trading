@@ -145,6 +145,7 @@ export default function App() {
         )}
         {view === "control" && (
           <ControlRoom
+            snapshot={snapshot}
             mode={autonomy.mode}
             changeMode={autonomy.changeMode}
             approvalTimeout={autonomy.approvalTimeout}
@@ -153,6 +154,7 @@ export default function App() {
             setRiskParams={setRiskParams}
             filters={notifs.filters}
             toggleFilter={notifs.toggleFilter}
+            onKill={handleKill}
           />
         )}
         {view === "log" && <CommandLog />}

@@ -197,6 +197,7 @@ class JarvisEngine:
         self._close_history: dict[str, deque] = defaultdict(lambda: deque(maxlen=250))
         self._bars_since_reclassify = 0
         self._signal_dedup: dict[str, datetime] = {}
+        self._disabled_strategies: set[str] = set()
         self._running = False
         self._tasks: list[asyncio.Task] = []
         self._tick_count = 0
@@ -290,6 +291,9 @@ class JarvisEngine:
         for sid in _TF_MAP.get(bar.timeframe, []):
             strat = self._strategies.get(sid)
             if strat is None:
+                continue
+            if sid in self._disabled_strategies:
+                logger.debug("strategy %s skipped (disabled by user)", sid)
                 continue
             if not strat.is_active(self._regime):
                 logger.debug("strategy %s skipped (not active in %s)", sid, self._regime)
@@ -507,6 +511,76 @@ async def _route(method: str, path: str, query: dict, body: dict) -> tuple[int, 
         if _engine:
             await _engine.manual_kill()
         return 200, {"status": "kill_switch_activated"}
+
+    if path == "/api/kill/reset" and method == "POST":
+        if _engine:
+            _engine._broker._killed = False
+            logger.info("Kill switch RESET by user")
+        return 200, {"status": "reset"}
+
+    if path == "/api/symbols" and method == "GET":
+        from core.feeds.dhan_instruments import EQUITY_INSTRUMENTS, CURRENCY_PAIRS
+        return 200, {
+            "equity":             WATCH_SYMBOLS,
+            "currency":           CURRENCY_SYMBOLS,
+            "available_equity":   list(EQUITY_INSTRUMENTS.keys()),
+            "available_currency": CURRENCY_PAIRS,
+        }
+
+    if path == "/api/symbols" and method == "POST":
+        equity   = [s for s in body.get("equity",   []) if isinstance(s, str)]
+        currency = [s for s in body.get("currency", []) if isinstance(s, str)]
+        SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        existing: dict = {}
+        if SETTINGS_FILE.exists():
+            try:
+                existing = json.loads(SETTINGS_FILE.read_text())
+            except Exception:
+                pass
+        existing["watch_symbols"]    = equity
+        existing["currency_symbols"] = currency
+        SETTINGS_FILE.write_text(json.dumps(existing, indent=2))
+        return 200, {"status": "saved", "restart_required": True,
+                     "equity": equity, "currency": currency}
+
+    if path == "/api/strategy/toggle" and method == "POST":
+        sid     = body.get("id", "")
+        enabled = bool(body.get("enabled", True))
+        if _engine and sid in _engine._strategies:
+            if enabled:
+                _engine._disabled_strategies.discard(sid)
+            else:
+                _engine._disabled_strategies.add(sid)
+            logger.info("Strategy %s %s by user", sid, "ENABLED" if enabled else "DISABLED")
+        return 200, {"status": "ok", "id": sid, "enabled": enabled}
+
+    if path == "/api/strategies/state" and method == "GET":
+        if _engine is None:
+            return 200, {}
+        return 200, {
+            sid: sid not in _engine._disabled_strategies
+            for sid in _engine._strategies
+        }
+
+    if path == "/api/position/close" and method == "POST":
+        symbol  = body.get("symbol")
+        all_pos = body.get("all", False)
+        if _engine:
+            if all_pos:
+                await _engine._broker.square_off_all()
+                logger.info("All positions closed by user")
+            elif symbol:
+                pos = (await _engine._broker.get_positions()).get(symbol)
+                if pos and pos.qty != 0:
+                    from core.broker.base_broker import Order, OrderSide, OrderType, ProductType
+                    side  = OrderSide.SELL if pos.qty > 0 else OrderSide.BUY
+                    order = Order(symbol=symbol, side=side, order_type=OrderType.MARKET,
+                                  qty=abs(pos.qty), product=ProductType.INTRADAY,
+                                  strategy_id="MANUAL_CLOSE")
+                    await _engine._broker.place_order(order)
+                    logger.info("Position %s closed by user", symbol)
+        return 200, {"status": "ok"}
+
     return 404, {"error": f"not found: {method} {path}"}
 
 async def _handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -594,13 +668,19 @@ def _build_feed(cfg: dict):
 
 
 async def main() -> None:
-    global _engine
+    global _engine, WATCH_SYMBOLS, CURRENCY_SYMBOLS
 
     cfg = _load_settings()
     logging.basicConfig(
         level=getattr(logging, cfg.get("log_level", "INFO"), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
+    # Override symbol lists from settings if saved via frontend
+    if "watch_symbols" in cfg and cfg["watch_symbols"]:
+        WATCH_SYMBOLS = cfg["watch_symbols"]
+    if "currency_symbols" in cfg:
+        CURRENCY_SYMBOLS = cfg["currency_symbols"]
 
     pathlib.Path(cfg["intent_log_path"]).parent.mkdir(parents=True, exist_ok=True)
     pathlib.Path(cfg["pnl_db_path"]).parent.mkdir(parents=True, exist_ok=True)
