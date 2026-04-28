@@ -11,9 +11,10 @@ dist/
 # Env
 .env
 
-# Logs / DB
+# Logs / DB / settings (may contain API credentials)
 logs/
 data/*.db
+data/settings.json
 
 # Node / dashboard
 dashboard/node_modules/

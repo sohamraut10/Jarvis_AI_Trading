@@ -33,12 +33,15 @@ REST endpoints
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Optional
+
+from config.settings import SETTINGS_FILE, load_settings
 
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -467,13 +470,13 @@ def _get_engine() -> Optional[JarvisEngine]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _engine
+    _cfg = load_settings()
     _engine = JarvisEngine(
-        initial_capital=float(os.getenv("INITIAL_CAPITAL", "10000")),
-        kill_switch_amount=float(os.getenv("INITIAL_CAPITAL", "10000"))
-        * float(os.getenv("KILL_SWITCH_PCT", "0.03")),
-        kelly_fraction=float(os.getenv("KELLY_FRACTION", "0.5")),
-        intent_log_path=os.getenv("INTENT_LOG_PATH", "logs/intent.jsonl"),
-        pnl_db_path=os.getenv("PNL_DB_PATH", "data/pnl.db"),
+        initial_capital=_cfg.initial_capital,
+        kill_switch_amount=_cfg.kill_switch_amount,
+        kelly_fraction=_cfg.kelly_fraction,
+        intent_log_path=_cfg.intent_log_path,
+        pnl_db_path=_cfg.pnl_db_path,
     )
     await _engine.start()
     # Broadcast loop
@@ -586,6 +589,69 @@ async def get_strategies():
         })
     strategies_info.sort(key=lambda x: x["sharpe"], reverse=True)
     return {"regime": str(_engine._regime), "strategies": strategies_info}
+
+
+@app.get("/api/settings")
+async def get_settings():
+    """Return current settings from data/settings.json (credentials masked)."""
+    raw: dict = {}
+    if SETTINGS_FILE.exists():
+        try:
+            raw = json.loads(SETTINGS_FILE.read_text())
+        except Exception:
+            pass
+
+    def _mask(val: str, keep: int = 4) -> str:
+        if not val:
+            return ""
+        return val[:keep] + "•" * max(0, len(val) - keep)
+
+    return {
+        **raw,
+        "dhan_client_id":    _mask(raw.get("dhan_client_id", "")),
+        "dhan_access_token": "•" * 8 if raw.get("dhan_access_token") else "",
+    }
+
+
+@app.post("/api/settings")
+async def save_settings(body: dict):
+    """
+    Persist settings to data/settings.json and apply runtime-applicable
+    values to the running engine immediately.  Credentials containing '•'
+    are treated as masked placeholders and are not overwritten.
+    """
+    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    # Read existing file so we can merge
+    existing: dict = {}
+    if SETTINGS_FILE.exists():
+        try:
+            existing = json.loads(SETTINGS_FILE.read_text())
+        except Exception:
+            pass
+
+    merged = {**existing, **body}
+
+    # Preserve real credentials when the masked placeholder is sent back
+    for cred_key in ("dhan_client_id", "dhan_access_token"):
+        if "•" in str(merged.get(cred_key, "")):
+            merged[cred_key] = existing.get(cred_key, "")
+
+    SETTINGS_FILE.write_text(json.dumps(merged, indent=2))
+
+    # Apply runtime-applicable settings immediately
+    restart_keys = {"initial_capital", "paper_mode", "hmm_states",
+                    "ws_port", "pnl_db_path", "intent_log_path"}
+    restart_required = bool(restart_keys & set(body.keys()))
+
+    if _engine:
+        ic  = float(merged.get("initial_capital", 10000))
+        ksp = float(merged.get("kill_switch_pct", 0.03))
+        kf  = float(merged.get("kelly_fraction", 0.5))
+        _engine._broker._kill_switch_amount = ic * ksp
+        _engine._kelly_sizer._kelly_fraction = kf
+
+    return {"status": "saved", "restart_required": restart_required}
 
 
 @app.post("/api/kill")
