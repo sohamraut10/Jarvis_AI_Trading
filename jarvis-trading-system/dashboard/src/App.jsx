@@ -1,35 +1,58 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import ApprovalBanner from "./components/ApprovalBanner";
+import DrawdownBar from "./components/DrawdownBar";
 import HUD from "./components/HUD";
-import PnLPanel from "./components/PnLPanel";
-import PositionTable from "./components/PositionTable";
-import SignalLog from "./components/SignalLog";
-import StrategyRanks from "./components/StrategyRanks";
+import NavBar from "./components/NavBar";
+import NotificationStack from "./components/NotificationStack";
+import useAutonomy from "./hooks/useAutonomy";
+import useNotifications from "./hooks/useNotifications";
 import useWebSocket from "./hooks/useWebSocket";
+import BrainAnalytics from "./views/BrainAnalytics";
+import CommandLog from "./views/CommandLog";
+import ControlRoom from "./views/ControlRoom";
+import MissionControl from "./views/MissionControl";
+import StrategyArena from "./views/StrategyArena";
+import TradeLedger from "./views/TradeLedger";
 
 const WS_URL =
   import.meta.env.VITE_WS_URL ??
   `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws`;
+
 const MAX_PNL_HISTORY = 300;
 const MAX_SIGNALS = 100;
 
+const DEFAULT_RISK = {
+  killSwitchPct:   0.03,
+  kellyFraction:   0.50,
+  maxTradePct:     0.20,
+  maxConcentration: 0.30,
+};
+
 export default function App() {
   const { snapshot, connected, send } = useWebSocket(WS_URL);
-  const [pnlHistory, setPnlHistory] = useState([]);
-  const [signals, setSignals] = useState([]);
-  const seenSignalsRef = useRef(new Set());
+  const autonomy = useAutonomy(send);
+  const notifs   = useNotifications();
 
-  // Build rolling P&L history from each snapshot
+  const [view, setView]           = useState("mission");
+  const [pnlHistory, setPnlHistory] = useState([]);
+  const [signals, setSignals]     = useState([]);
+  const [riskParams, setRiskParams] = useState(DEFAULT_RISK);
+  const seenSignalsRef = useRef(new Set());
+  const prevRegimeRef  = useRef(null);
+
+  // ── Snapshot processing ────────────────────────────────────────────────────
   useEffect(() => {
     if (!snapshot) return;
+
     const pnl = snapshot.broker?.daily_pnl ?? 0;
-    const t = new Date().toLocaleTimeString("en-IN", { hour12: false });
+    const t   = new Date().toLocaleTimeString("en-IN", { hour12: false });
     setPnlHistory((prev) => {
       const next = [...prev, { t, pnl }];
       return next.length > MAX_PNL_HISTORY ? next.slice(-MAX_PNL_HISTORY) : next;
     });
 
-    // Collect new signals from snapshot
-    const incoming = snapshot.recent_signals ?? [];
+    // Deduplicate signals (server uses "signals" key)
+    const incoming = snapshot.signals ?? [];
     setSignals((prev) => {
       const seen = seenSignalsRef.current;
       const fresh = incoming.filter((s) => {
@@ -42,11 +65,28 @@ export default function App() {
       const next = [...prev, ...fresh];
       return next.length > MAX_SIGNALS ? next.slice(-MAX_SIGNALS) : next;
     });
-  }, [snapshot]);
+
+    // Notify on regime change
+    const regime = (snapshot.regime ?? "").replace("Regime.", "");
+    if (prevRegimeRef.current && prevRegimeRef.current !== regime) {
+      notifs.notify("REGIME", `Regime changed: ${prevRegimeRef.current} → ${regime}`, "info");
+    }
+    prevRegimeRef.current = regime;
+
+    // Notify on kill-switch
+    if (snapshot.broker?.kill_switch_active) {
+      notifs.notify("RISK", "Kill switch is ACTIVE — trading halted", "error");
+    }
+  }, [snapshot, notifs]);
 
   const handleKill = useCallback(() => {
     send({ type: "kill_switch" });
   }, [send]);
+
+  // ── Risk param changes → send to engine ───────────────────────────────────
+  useEffect(() => {
+    send({ type: "update_risk", params: riskParams });
+  }, [riskParams, send]);
 
   if (!snapshot && !connected) {
     return (
@@ -58,55 +98,67 @@ export default function App() {
     );
   }
 
+  const broker       = snapshot?.broker ?? {};
+  const killThreshold = broker.kill_threshold ?? (riskParams.killSwitchPct * (broker.capital ?? 10000));
+
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100 flex flex-col">
-      <HUD snapshot={snapshot} connected={connected} onKill={handleKill} />
+      <HUD
+        snapshot={snapshot}
+        connected={connected}
+        onKill={handleKill}
+        mode={autonomy.mode}
+      />
 
-      <main className="flex-1 grid grid-cols-1 lg:grid-cols-3 gap-4 p-4 overflow-auto">
-        {/* Left column */}
-        <div className="lg:col-span-2 flex flex-col gap-4">
-          <PnLPanel
-            pnlHistory={pnlHistory.length ? pnlHistory : [{ t: "—", pnl: 0 }]}
+      <DrawdownBar
+        dailyPnl={broker.daily_pnl ?? 0}
+        killThreshold={killThreshold}
+      />
+
+      {autonomy.mode === "SEMI_AUTO" && autonomy.pending.length > 0 && (
+        <ApprovalBanner
+          pending={autonomy.pending}
+          onApprove={autonomy.approve}
+          onReject={autonomy.reject}
+          onSnooze={autonomy.snooze}
+          timeoutSecs={autonomy.approvalTimeout}
+        />
+      )}
+
+      <NavBar active={view} onChange={setView} />
+
+      <main className="flex-1 overflow-auto min-h-0">
+        {view === "mission" && (
+          <MissionControl
             snapshot={snapshot}
+            pnlHistory={pnlHistory}
+            signals={signals}
+            connected={connected}
           />
-          <PositionTable snapshot={snapshot} />
-          <SignalLog signals={signals} />
-        </div>
-
-        {/* Right column */}
-        <div className="flex flex-col gap-4">
-          <StrategyRanks snapshot={snapshot} />
-
-          {/* System stats tile */}
-          {snapshot && (
-            <div className="bg-gray-900 border border-gray-800 rounded p-4 text-xs space-y-2">
-              <div className="text-[10px] text-gray-500 tracking-widest uppercase mb-2">
-                System
-              </div>
-              <Stat label="Capital" value={`₹${(snapshot.broker?.capital ?? 0).toFixed(2)}`} />
-              <Stat
-                label="Portfolio"
-                value={`₹${(snapshot.broker?.portfolio_value ?? 0).toFixed(2)}`}
-              />
-              <Stat
-                label="Kill threshold"
-                value={`₹${(snapshot.broker?.kill_threshold ?? 0).toFixed(2)}`}
-              />
-              <Stat label="Open positions" value={Object.keys(snapshot.positions ?? {}).length} />
-              <Stat label="Regime" value={snapshot.regime ?? "—"} />
-            </div>
-          )}
-        </div>
+        )}
+        {view === "arena" && (
+          <StrategyArena snapshot={snapshot} signals={signals} />
+        )}
+        {view === "ledger" && <TradeLedger />}
+        {view === "brain"  && (
+          <BrainAnalytics snapshot={snapshot} pnlHistory={pnlHistory} />
+        )}
+        {view === "control" && (
+          <ControlRoom
+            mode={autonomy.mode}
+            changeMode={autonomy.changeMode}
+            approvalTimeout={autonomy.approvalTimeout}
+            setApprovalTimeout={autonomy.setApprovalTimeout}
+            riskParams={riskParams}
+            setRiskParams={setRiskParams}
+            filters={notifs.filters}
+            toggleFilter={notifs.toggleFilter}
+          />
+        )}
+        {view === "log" && <CommandLog />}
       </main>
-    </div>
-  );
-}
 
-function Stat({ label, value }) {
-  return (
-    <div className="flex justify-between">
-      <span className="text-gray-600">{label}</span>
-      <span className="text-gray-300 tabular-nums font-mono">{value}</span>
+      <NotificationStack banners={notifs.banners} onDismiss={notifs.dismiss} />
     </div>
   );
 }

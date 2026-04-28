@@ -1,11 +1,12 @@
 import { useState } from "react";
+import { MODE_LABEL, MODE_STYLE } from "../hooks/useAutonomy";
 import RegimeBadge from "./RegimeBadge";
 import { formatCurrency, pnlClass } from "../lib/utils";
 
-export default function HUD({ snapshot, connected, onKill }) {
+export default function HUD({ snapshot, connected, onKill, mode }) {
   const [confirming, setConfirming] = useState(false);
   const broker = snapshot?.broker ?? {};
-  const regime = snapshot?.regime ?? "UNKNOWN";
+  const regime = (snapshot?.regime ?? "UNKNOWN").replace("Regime.", "");
   const pnl = broker.daily_pnl ?? 0;
   const killed = broker.kill_switch_active ?? false;
 
@@ -27,6 +28,11 @@ export default function HUD({ snapshot, connected, onKill }) {
       </span>
 
       <RegimeBadge regime={regime} />
+
+      {/* Autonomy mode badge */}
+      <span className={`text-[10px] font-bold px-2 py-1 rounded border tracking-widest shrink-0 ${MODE_STYLE[mode] ?? MODE_STYLE.MANUAL}`}>
+        {MODE_LABEL[mode] ?? "MANUAL"}
+      </span>
 
       {/* WS status */}
       <span className={`text-xs shrink-0 ${connected ? "text-green-500" : "text-red-500"}`}>
