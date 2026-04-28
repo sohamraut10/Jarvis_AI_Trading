@@ -92,12 +92,14 @@ function MarketScanner({ scanner, connected, onSearchOpen }) {
     return () => clearTimeout(t);
   }, [scanner]);
 
-  const entries    = Object.entries(scanner ?? {});
-  const liveCount  = entries.filter(([, d]) => d.status === "live").length;
-  const totalCount = entries.length;
+  const allEntries  = Object.entries(scanner ?? {});
+  const liveEntries = allEntries.filter(([, d]) => d.status === "live");
+  const liveCount   = liveEntries.length;
+  const totalCount  = allEntries.length;
 
-  const equities = entries.filter(([, d]) => !d.is_currency);
-  const currency = entries.filter(([, d]) =>  d.is_currency);
+  // Only render pairs that are actually receiving ticks right now
+  const currency = liveEntries.filter(([, d]) =>  d.is_currency);
+  const equities = liveEntries.filter(([, d]) => !d.is_currency);
 
   return (
     <div className="bg-gray-900 border border-gray-800 rounded p-4">
@@ -109,7 +111,9 @@ function MarketScanner({ scanner, connected, onSearchOpen }) {
         <div className="flex items-center gap-2">
           <span className={`w-1.5 h-1.5 rounded-full ${connected ? "bg-green-500 animate-pulse" : "bg-gray-600"}`} />
           <span className="text-[9px] text-gray-600 font-mono">
-            {connected ? `${liveCount}/${totalCount} live` : "disconnected"}
+            {connected
+              ? liveCount > 0 ? `${liveCount} live` : totalCount > 0 ? "market closed" : "scanning"
+              : "disconnected"}
           </span>
           {onSearchOpen && (
             <button
@@ -126,18 +130,25 @@ function MarketScanner({ scanner, connected, onSearchOpen }) {
         </div>
       </div>
 
-      {/* Summary bar */}
+      {/* Summary bar — only when trading */}
       {liveCount > 0 && (
         <div className="bg-cyan-950/20 border border-cyan-900/40 rounded px-2 py-1 mb-3">
           <span className="text-[9px] text-cyan-600">
-            Auto-trading: {entries.filter(([, d]) => d.status === "live").map(([s]) => s).join(", ")}
+            Auto-trading: {liveEntries.map(([s]) => s).join(", ")}
           </span>
         </div>
       )}
 
-      {entries.length === 0 ? (
+      {totalCount === 0 ? (
         <div className="text-xs text-gray-600 text-center py-4 animate-pulse">
           Discovering available pairs…
+        </div>
+      ) : liveCount === 0 ? (
+        <div className="py-4 text-center space-y-1">
+          <div className="text-xs text-gray-600">Market closed</div>
+          <div className="text-[9px] text-gray-700">
+            {totalCount} pair{totalCount !== 1 ? "s" : ""} subscribed · waiting for ticks
+          </div>
         </div>
       ) : (
         <>
