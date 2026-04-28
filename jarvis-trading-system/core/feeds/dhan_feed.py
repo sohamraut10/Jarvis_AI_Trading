@@ -80,6 +80,29 @@ class DhanFeed:
         logger.info("[Dhan] connecting  client=%s...  symbols=%s",
                     self._client_id[:6] + "***", self._symbols)
 
+        def _on_ticks_raw(raw: dict) -> None:
+            """Called from the receive loop with a single processed tick dict."""
+            if not self._running:
+                return
+            # security_id comes back as int from process_ticker
+            sid = str(raw.get("security_id", ""))
+            sym = _ID_TO_SYM.get(sid)
+            if not sym:
+                return
+            ltp = float(raw.get("LTP") or 0)
+            vol = int(raw.get("volume") or 800)
+            if ltp > 0:
+                self._ltp[sym] = ltp
+                self.ticks_received += 1
+                self.last_tick_time = time.time()
+
+                if self.ticks_received <= len(self._symbols):
+                    logger.info("[Dhan] first tick  %s=₹%.2f  vol=%d", sym, ltp, vol)
+
+                asyncio.run_coroutine_threadsafe(
+                    tick_callback(sym, ltp, vol), loop
+                )
+
         def _on_open() -> None:
             self.connected    = True
             self.connect_time = time.time()
@@ -97,33 +120,7 @@ class DhanFeed:
             else:
                 logger.warning("[Dhan] connection closed before establishing")
 
-        def _on_error(err) -> None:
-            logger.error("[Dhan] feed error: %s", err)
-
-        def _on_ticks(ticks: list[dict]) -> None:
-            for tick in ticks:
-                sid = str(tick.get("security_id", ""))
-                sym = _ID_TO_SYM.get(sid)
-                if not sym or not self._running:
-                    continue
-                ltp = float(tick.get("LTP") or tick.get("last_price") or 0)
-                vol = int(tick.get("volume") or 800)
-                if ltp > 0:
-                    self._ltp[sym] = ltp
-                    self.ticks_received += 1
-                    self.last_tick_time = time.time()
-
-                    # Log first tick per symbol to confirm data is flowing
-                    if self.ticks_received <= len(self._symbols):
-                        logger.info("[Dhan] first tick  %s=₹%.2f  vol=%d", sym, ltp, vol)
-
-                    asyncio.run_coroutine_threadsafe(
-                        tick_callback(sym, ltp, vol), loop
-                    )
-
         def _run() -> None:
-            # dhanhq calls asyncio.get_event_loop() in __init__ and run_forever;
-            # thread-pool threads have no event loop, so create one explicitly.
             import asyncio as _asyncio
             thread_loop = _asyncio.new_event_loop()
             _asyncio.set_event_loop(thread_loop)
@@ -131,20 +128,32 @@ class DhanFeed:
             attempt = 0
             while self._running:
                 attempt += 1
-                try:
-                    logger.info("[Dhan] WebSocket connect attempt #%d", attempt)
+                logger.info("[Dhan] WebSocket connect attempt #%d", attempt)
+
+                async def _recv_loop():
                     feed = mf.DhanFeed(
                         self._client_id,
                         self._access_token,
-                        instruments,       # each tuple already contains subscription type
-                        version='v2',      # v2 uses URL query-param auth (avoids HTTP 400)
+                        instruments,
+                        version='v2',
                     )
-                    # Callbacks are set as attributes, not constructor kwargs
-                    feed.on_ticks = _on_ticks
+                    # Connect and subscribe (v2: URL-param auth, no binary packet needed)
+                    await feed.connect()
                     _on_open()
-                    feed.run_forever()
-                    # run_forever() returned — means disconnected
-                    _on_close()
+
+                    try:
+                        while self._running:
+                            data = await feed.ws.recv()
+                            result = feed.process_data(data)
+                            if result and isinstance(result, dict):
+                                _on_ticks_raw(result)
+                    except Exception as exc:
+                        logger.error("[Dhan] recv error: %s", exc)
+                    finally:
+                        _on_close()
+
+                try:
+                    thread_loop.run_until_complete(_recv_loop())
                 except Exception as exc:
                     self.connected = False
                     logger.error("[Dhan] feed error: %s", exc)
