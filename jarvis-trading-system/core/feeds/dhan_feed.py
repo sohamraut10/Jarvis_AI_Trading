@@ -130,8 +130,9 @@ class DhanFeed:
 
             info     = self._instrument_info.get(sym, {})
             seg      = info.get("segment", "")
-            is_comm  = seg == "MCX_COMM"
-            is_curr  = sym.endswith("INR") and not is_comm
+            # fall back to constructor lists when scrip master hasn't resolved yet
+            is_comm  = seg == "MCX_COMM" or (not seg and sym in self._comm_symbols)
+            is_curr  = (sym.endswith("INR") or sym in self._curr_symbols) and not is_comm
             exchange = "MCX" if is_comm else ("NSE_CURR" if is_curr else "NSE")
             result[sym] = {
                 "status":        status,
