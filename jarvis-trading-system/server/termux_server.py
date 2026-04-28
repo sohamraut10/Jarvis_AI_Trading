@@ -74,9 +74,13 @@ WS_PORT   = 8765
 HTTP_PORT = 8766
 
 WATCH_SYMBOLS: list[str] = ["RELIANCE", "TCS", "INFY", "HDFCBANK", "SBIN"]
+# NSE currency futures — set to [] to disable, or add pairs: "EURINR", "GBPINR", "JPYINR"
+CURRENCY_SYMBOLS: list[str] = ["USDINR"]
 BASE_PRICES: dict[str, float] = {
     "RELIANCE": 2500.0, "TCS": 3800.0, "INFY": 1500.0,
     "HDFCBANK": 1700.0, "SBIN": 800.0,
+    # Currency pair base prices (INR per unit, used only by SimulatedFeed)
+    "USDINR": 84.0, "EURINR": 90.0, "GBPINR": 105.0, "JPYINR": 0.55,
 }
 _TF_MAP: dict[str, list[str]] = {
     "1min": ["vwap_breakout"],
@@ -204,7 +208,10 @@ class JarvisEngine:
         logger.info("=" * 55)
         logger.info("  JARVIS ENGINE STARTED  [feed=%s]", feed_type)
         logger.info("  Strategies : %s", ", ".join(self._strategies.keys()))
-        logger.info("  Symbols    : %s", ", ".join(WATCH_SYMBOLS))
+        all_syms = WATCH_SYMBOLS + CURRENCY_SYMBOLS
+        logger.info("  Equities   : %s", ", ".join(WATCH_SYMBOLS))
+        if CURRENCY_SYMBOLS:
+            logger.info("  Currency   : %s", ", ".join(CURRENCY_SYMBOLS))
         logger.info("  Capital    : ₹%.0f", self._broker._initial_capital if hasattr(self._broker, '_initial_capital') else 0)
         logger.info("=" * 55)
         self._tasks.append(asyncio.create_task(self._feed.start(self._on_tick)))
@@ -572,13 +579,18 @@ def _build_feed(cfg: dict):
     if client_id and access_token:
         try:
             from core.feeds.dhan_feed import DhanFeed
+            all_syms = WATCH_SYMBOLS + CURRENCY_SYMBOLS
             logger.info("Dhan credentials found — using live market feed (paper orders)")
-            return DhanFeed(client_id, access_token, WATCH_SYMBOLS)
+            if CURRENCY_SYMBOLS:
+                logger.info("Currency pairs enabled: %s", ", ".join(CURRENCY_SYMBOLS))
+            return DhanFeed(client_id, access_token, WATCH_SYMBOLS,
+                            currency_symbols=CURRENCY_SYMBOLS or None)
         except Exception as exc:
             logger.warning("Could not load DhanFeed (%s) — falling back to SimulatedFeed", exc)
 
+    all_syms = WATCH_SYMBOLS + CURRENCY_SYMBOLS
     logger.info("No Dhan credentials — using SimulatedFeed")
-    return SimulatedFeed(WATCH_SYMBOLS, BASE_PRICES)
+    return SimulatedFeed(all_syms, BASE_PRICES)
 
 
 async def main() -> None:
