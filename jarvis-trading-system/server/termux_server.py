@@ -73,9 +73,9 @@ SIGNAL_DEDUP_SECONDS   = 60
 WS_PORT   = 8765
 HTTP_PORT = 8766
 
-WATCH_SYMBOLS: list[str] = []   # no equities — trading currency only
-# NSE currency futures — set to [] to disable, or add pairs: "USDINR", "EURINR", "GBPINR", "JPYINR"
-CURRENCY_SYMBOLS: list[str] = ["GBPINR"]
+WATCH_SYMBOLS: list[str] = []   # no equities — currency auto-discovery mode
+# All 4 NSE currency pairs — feed detects which are actually live
+CURRENCY_SYMBOLS: list[str] = ["USDINR", "EURINR", "GBPINR", "JPYINR"]
 BASE_PRICES: dict[str, float] = {
     "RELIANCE": 2500.0, "TCS": 3800.0, "INFY": 1500.0,
     "HDFCBANK": 1700.0, "SBIN": 800.0,
@@ -288,6 +288,12 @@ class JarvisEngine:
             else:
                 logger.info("regime check  still %s  (%s bars until next)", regime_name, REGIME_RECLASSIFY_BARS)
 
+        # Only scan live symbols (confirmed active by the feed's discovery)
+        if hasattr(self._feed, "active_symbols"):
+            if bar.symbol not in self._feed.active_symbols():
+                logger.debug("bar skipped — %s not yet confirmed live", bar.symbol)
+                return
+
         for sid in _TF_MAP.get(bar.timeframe, []):
             strat = self._strategies.get(sid)
             if strat is None:
@@ -375,12 +381,23 @@ class JarvisEngine:
         await self._intent_logger.log_allocation(result)
 
     def snapshot(self) -> dict:
+        scanner = {}
+        if hasattr(self._feed, "scanner_data"):
+            scanner = self._feed.scanner_data()
+        elif hasattr(self._feed, "_all_symbols"):
+            # SimulatedFeed fallback — mark all as live
+            for s in self._feed._all_symbols:
+                scanner[s] = {"status": "live", "ticks": self._tick_count,
+                               "ltp": self._feed.current_price(s),
+                               "last_tick_ago": 1.0, "is_currency": s.endswith("INR")}
         return {
             "type": "snapshot", "ts": _utcnow().isoformat(),
             "regime": str(self._regime), "regime_features": self._regime_features,
             "broker": self._broker.snapshot(), "allocations": self._allocations,
             "signals": list(self._recent_signals)[-10:],
-            "ltp": {s: round(v, 2) for s, v in self._broker._ltp.items()},
+            "ltp": {s: round(v, 4) if s.endswith("INR") else round(v, 2)
+                    for s, v in self._broker._ltp.items()},
+            "scanner": scanner,
         }
 
     async def manual_kill(self) -> None:
