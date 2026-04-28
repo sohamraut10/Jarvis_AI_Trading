@@ -144,8 +144,25 @@ class DhanFeed:
         self._running = True
         loop = asyncio.get_event_loop()
 
-        from core.feeds.dhan_instruments import build_instrument_map
-        instrument_map = build_instrument_map(self._eq_symbols, self._curr_symbols)
+        # Wait up to 45 s for the scrip master (downloading in background).
+        # This avoids _raw_currency_search downloading the full 8 MB CSV four
+        # times in the event-loop thread, which would freeze the server.
+        from core.feeds.dhan_instruments import get_scrip_master, build_instrument_map
+        sm = get_scrip_master()
+        if not sm.is_loaded():
+            logger.info("[Dhan] waiting for scrip master to finish loading…")
+            deadline = time.time() + 45
+            while not sm.is_loaded() and time.time() < deadline:
+                await asyncio.sleep(2)
+            if sm.is_loaded():
+                logger.info("[Dhan] scrip master ready — resolving instruments")
+            else:
+                logger.warning("[Dhan] scrip master still loading after 45s — using fallback lookup")
+
+        # Run synchronously in thread pool to avoid blocking the event loop
+        instrument_map = await loop.run_in_executor(
+            None, build_instrument_map, self._eq_symbols, self._curr_symbols
+        )
 
         if not instrument_map:
             logger.error("[Dhan] no instruments resolved — falling back to SimulatedFeed")
