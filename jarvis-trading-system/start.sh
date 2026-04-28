@@ -7,8 +7,13 @@ mkdir -p data logs
 
 # Kill any previous instances on our ports
 for PORT in 8765 8766 5173; do
-  lsof -ti tcp:$PORT 2>/dev/null | xargs kill -9 2>/dev/null || true
+  if command -v lsof &>/dev/null; then
+    lsof -ti tcp:$PORT 2>/dev/null | xargs kill -9 2>/dev/null || true
+  elif command -v fuser &>/dev/null; then
+    fuser -k ${PORT}/tcp 2>/dev/null || true
+  fi
 done
+sleep 1
 
 echo "Starting backend..."
 python -m server.termux_server &
@@ -24,6 +29,7 @@ trap "kill $BACKEND_PID $DASH_PID 2>/dev/null; exit" INT TERM
 echo ""
 echo "  Backend : ws://localhost:8765  http://localhost:8766"
 echo "  Frontend: http://localhost:5173"
+echo "  (no Dhan creds → SimulatedFeed)"
 echo ""
 echo "Press Ctrl+C to stop."
 wait

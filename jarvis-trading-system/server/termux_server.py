@@ -389,9 +389,10 @@ class JarvisEngine:
         scanner = {}
         if hasattr(self._feed, "scanner_data"):
             scanner = self._feed.scanner_data()
-        elif hasattr(self._feed, "_all_symbols"):
-            # SimulatedFeed fallback — mark all as live
-            for s in self._feed._all_symbols:
+        else:
+            # SimulatedFeed — _symbols attr; mark all as live
+            syms = getattr(self._feed, "_symbols", None) or getattr(self._feed, "_all_symbols", [])
+            for s in syms:
                 scanner[s] = {"status": "live", "ticks": self._tick_count,
                                "ltp": self._feed.current_price(s),
                                "last_tick_ago": 1.0, "is_currency": s.endswith("INR")}
