@@ -1,31 +1,14 @@
-# Termux-compatible requirements
-# numpy must be installed via pkg BEFORE this file:
-#   pkg install python-numpy
+# Termux requirements — zero Rust/C compilation needed.
+# Install numpy first via pkg:  pkg install python-numpy
 #
-# RL retraining (torch/SB3) is not available on ARM — all paper-trading
-# features work normally without it.
+# All packages here are pure Python or have pre-built wheels.
+# No FastAPI, no pydantic, no orjson, no pydantic-core.
 
-# ── Core API & async ──────────────────────────────────────────────────────────
-# fastapi 0.104.1 = last version before orjson became a hard dependency
-fastapi==0.104.1
-starlette==0.27.0
-uvicorn==0.29.0
-websockets==12.0
-httpx==0.27.0
-python-dotenv==1.0.1
-pydantic==2.7.1
-pydantic-settings==2.2.1
-anyio>=3.7.1
-
-# ── Async / scheduling / persistence ─────────────────────────────────────────
-apscheduler==3.10.4
-aiofiles==23.2.1
-aiosqlite==0.20.0
-sqlalchemy==2.0.30
-structlog==24.1.0
-
-# ── HMM regime classifier (optional — pure fallback if it won't compile) ─────
-hmmlearn==0.3.2
-
-# ── Bayesian optimizer (pure Python) ─────────────────────────────────────────
-optuna==3.6.1
+websockets==12.0       # WebSocket server (pure Python)
+aiosqlite==0.20.0      # async SQLite  (pure Python)
+apscheduler==3.10.4    # scheduler     (pure Python)
+aiofiles==23.2.1       # async file IO (pure Python)
+structlog==24.1.0      # logging       (pure Python)
+python-dotenv==1.0.1   # .env loader   (pure Python)
+optuna==3.6.1          # Bayesian opt  (pure Python)
+sqlalchemy==2.0.30     # ORM           (pure Python core)

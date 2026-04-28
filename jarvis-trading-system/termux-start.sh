@@ -1,5 +1,5 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# JARVIS Termux launcher
+# JARVIS Termux launcher — uses pure-Python server (no FastAPI/pydantic)
 
 set -e
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -15,36 +15,34 @@ echo ""
 echo "  JARVIS Trading Command Center"
 echo "  ─────────────────────────────"
 
-# ── Smoke-test imports before daemonising ─────────────────────────────────────
+# ── Smoke-test: only need numpy + websockets ──────────────────────────────────
 echo "  Checking dependencies…"
 python - <<'PYCHECK'
 import sys
 missing = []
-for mod in ["fastapi", "uvicorn", "pydantic_settings", "aiosqlite", "apscheduler", "numpy"]:
+for mod in ["numpy", "websockets", "aiosqlite", "apscheduler"]:
     try:
         __import__(mod)
     except ImportError:
         missing.append(mod)
 if missing:
     print(f"  MISSING: {', '.join(missing)}")
-    print("  Run: pip install -r requirements-termux.txt")
+    print("  Run:  pkg install python-numpy")
+    print("        pip install -r requirements-termux.txt")
     sys.exit(1)
-print("  Core deps OK")
+print("  Deps OK")
 PYCHECK
 
 # ── Start backend ─────────────────────────────────────────────────────────────
-echo "  Starting backend (port 8765)…"
-python -m uvicorn server.ws_server:app \
-  --host 0.0.0.0 --port 8765 \
-  --log-level info \
-  > logs/server.log 2>&1 &
+echo "  Starting backend  (WS:8765  HTTP:8766)…"
+python -m server.termux_server > logs/server.log 2>&1 &
 BACKEND_PID=$!
 
-# Wait up to 20s for backend to become ready
+# Wait up to 20s for HTTP API to respond
 READY=0
 for i in $(seq 1 20); do
   sleep 1
-  if curl -sf http://127.0.0.1:8765/api/status > /dev/null 2>&1; then
+  if curl -sf http://127.0.0.1:8766/api/status > /dev/null 2>&1; then
     READY=1
     echo "  Backend ready ✓"
     break
@@ -53,19 +51,19 @@ done
 
 if [ $READY -eq 0 ]; then
   echo ""
-  echo "  ✗ Backend failed to start. Last error:"
+  echo "  ✗ Backend failed. Last error:"
   echo "  ────────────────────────────────────────"
   tail -20 logs/server.log
   echo "  ────────────────────────────────────────"
-  echo "  To debug: python -m uvicorn server.ws_server:app --port 8765"
+  echo "  Debug: python -m server.termux_server"
   kill $BACKEND_PID 2>/dev/null
   exit 1
 fi
 
-# ── Start frontend ────────────────────────────────────────────────────────────
+# ── Start frontend (Termux Vite config: API→8766) ─────────────────────────────
 echo "  Starting dashboard (port 5173)…"
 cd dashboard
-npm run dev -- --host 0.0.0.0 &
+npm run dev -- --host 0.0.0.0 --config vite.termux.config.js &
 VITE_PID=$!
 cd "$REPO_DIR"
 sleep 3
@@ -76,7 +74,7 @@ LOCAL_IP=$(ip route get 1.1.1.1 2>/dev/null | awk '/src/{print $7}' \
 echo ""
 echo "  ────────────────────────────────────────"
 echo "  Open in Chrome:  http://localhost:5173"
-[ -n "$LOCAL_IP" ] && echo "  From PC/tablet:  http://$LOCAL_IP:5173"
+[ -n "$LOCAL_IP" ] && echo "  From another device: http://$LOCAL_IP:5173"
 echo "  ────────────────────────────────────────"
 echo "  Ctrl-C to stop"
 echo ""
