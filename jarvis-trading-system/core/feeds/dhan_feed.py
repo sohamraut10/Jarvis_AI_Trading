@@ -122,6 +122,12 @@ class DhanFeed:
                     )
 
         def _run() -> None:
+            # dhanhq calls asyncio.get_event_loop() in __init__ and run_forever;
+            # thread-pool threads have no event loop, so create one explicitly.
+            import asyncio as _asyncio
+            thread_loop = _asyncio.new_event_loop()
+            _asyncio.set_event_loop(thread_loop)
+
             attempt = 0
             while self._running:
                 attempt += 1
