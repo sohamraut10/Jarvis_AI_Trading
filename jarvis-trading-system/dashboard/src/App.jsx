@@ -6,7 +6,9 @@ import SignalLog from "./components/SignalLog";
 import StrategyRanks from "./components/StrategyRanks";
 import useWebSocket from "./hooks/useWebSocket";
 
-const WS_URL = import.meta.env.VITE_WS_URL ?? "ws://localhost:8765";
+const WS_URL =
+  import.meta.env.VITE_WS_URL ??
+  `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws`;
 const MAX_PNL_HISTORY = 300;
 const MAX_SIGNALS = 100;
 
