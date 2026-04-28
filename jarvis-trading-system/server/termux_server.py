@@ -222,9 +222,11 @@ class JarvisEngine:
         logger.info("  JARVIS ENGINE STARTED  [feed=%s]", feed_type)
         logger.info("  Strategies : %s", ", ".join(self._strategies.keys()))
         all_syms = WATCH_SYMBOLS + CURRENCY_SYMBOLS
-        logger.info("  Equities   : %s", ", ".join(WATCH_SYMBOLS))
+        logger.info("  Equities   : %s", ", ".join(WATCH_SYMBOLS) or "none")
         if CURRENCY_SYMBOLS:
             logger.info("  Currency   : %s", ", ".join(CURRENCY_SYMBOLS))
+        if MCX_SYMBOLS:
+            logger.info("  MCX        : %s", ", ".join(MCX_SYMBOLS))
         logger.info("  Capital    : ₹%.0f", self._broker._initial_capital if hasattr(self._broker, '_initial_capital') else 0)
         logger.info("=" * 55)
         self._tasks.append(asyncio.create_task(self._feed.start(self._on_tick)))
@@ -857,7 +859,7 @@ def _build_feed(cfg: dict):
 
 
 async def main() -> None:
-    global _engine, WATCH_SYMBOLS, CURRENCY_SYMBOLS
+    global _engine, WATCH_SYMBOLS, CURRENCY_SYMBOLS, MCX_SYMBOLS
 
     cfg = _load_settings()
     logging.basicConfig(
