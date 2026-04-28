@@ -33,6 +33,15 @@ from intelligence.pnl_tracker import PnLTracker
 from intelligence.regime_classifier import RegimeClassifier
 from intelligence.strategy_shift_engine import StrategyShiftEngine
 from strategies.base_strategy import Bar, BaseStrategy, Signal, SignalSide
+# ── Layer 5 AI Brain ───────────────────────────────────────────────────────────
+from ai_brain.ai_router import AIRouter
+from ai_brain.cost_throttle import CostThrottle
+from ai_brain.signal_scanner import SignalScanner
+from ai_brain.shortlister import Shortlister
+from ai_brain.analyst import Analyst
+from ai_brain.decision_engine import DecisionEngine
+from ai_brain.trade_monitor import TradeMonitor
+from ai_brain.action_executor import ActionExecutor
 from strategies.momentum.orb_breakout import ORBBreakout
 from strategies.momentum.rsi_momentum import RSIMomentum
 from strategies.momentum.vwap_breakout import VWAPBreakout
@@ -73,6 +82,9 @@ REGIME_RECLASSIFY_BARS = 5
 SIGNAL_DEDUP_SECONDS   = 60
 WS_PORT   = 8765
 HTTP_PORT = 8766
+AI_BRAIN_WARMUP_S      = 90     # wait before first brain cycle (bars need to accumulate)
+AI_BRAIN_INTERVAL_S    = 300    # re-run full pipeline every 5 min
+AI_BRAIN_MAX_PER_CYCLE = 3      # max LLM calls per pipeline cycle (cost guard)
 
 WATCH_SYMBOLS: list[str] = []   # no equities — currency auto-discovery mode
 # All 4 NSE currency pairs — feed detects which are actually live
@@ -201,6 +213,7 @@ class JarvisEngine:
         self._allocations: dict[str, float] = {}
         self._recent_signals: deque[dict] = deque(maxlen=50)
         self._close_history: dict[str, deque] = defaultdict(lambda: deque(maxlen=250))
+        self._bar_history: dict[str, deque] = defaultdict(lambda: deque(maxlen=500))
         self._bars_since_reclassify = 0
         self._signal_dedup: dict[str, datetime] = {}
         self._disabled_strategies: set[str] = set()
@@ -213,6 +226,17 @@ class JarvisEngine:
         self._auto_select_enabled:  bool      = True
         self._selected_symbols:     set[str]  = set()
         self._intelligence_updated: datetime  = _utcnow()
+        # ── Layer 5 AI Brain ──────────────────────────────────────────────────
+        self._router           = AIRouter()
+        self._cost_throttle    = CostThrottle()
+        self._signal_scanner   = SignalScanner()
+        self._shortlister      = Shortlister()
+        self._analyst          = Analyst()
+        self._decision_engine  = DecisionEngine(self._router, self._cost_throttle)
+        self._trade_monitor    = TradeMonitor()
+        self._action_executor  = ActionExecutor(self._trade_monitor)
+        self._ai_decisions: deque[dict] = deque(maxlen=50)
+        self._ai_brain_enabled = True
 
     async def start(self) -> None:
         await self._pnl_tracker.init()
@@ -232,6 +256,7 @@ class JarvisEngine:
         self._tasks.append(asyncio.create_task(self._feed.start(self._on_tick)))
         self._tasks.append(asyncio.create_task(self._heartbeat_loop()))
         self._tasks.append(asyncio.create_task(self._intelligence_loop()))
+        self._tasks.append(asyncio.create_task(self._ai_brain_loop()))
 
     async def stop(self) -> None:
         self._running = False
@@ -307,6 +332,93 @@ class JarvisEngine:
             top = [f"{s.symbol}({s.score:.0f})" for s in scores[:3]]
             logger.info("intelligence  top-3: %s  auto_select=%s", ", ".join(top), self._auto_select_enabled)
 
+    async def _ai_brain_loop(self) -> None:
+        await asyncio.sleep(AI_BRAIN_WARMUP_S)
+        while self._running:
+            try:
+                await self._run_ai_brain()
+            except Exception as exc:
+                logger.warning("AI brain loop error: %s", exc)
+            await asyncio.sleep(AI_BRAIN_INTERVAL_S)
+
+    async def _run_ai_brain(self) -> None:
+        if not self._ai_brain_enabled:
+            return
+
+        # Build scanner meta (same shape used by Shortlister / Analyst)
+        scanner_meta: dict = {}
+        if hasattr(self._feed, "scanner_data"):
+            scanner_meta = self._feed.scanner_data()
+        else:
+            for s in getattr(self._feed, "_symbols", []) + getattr(self._feed, "_all_symbols", []):
+                scanner_meta[s] = {
+                    "status": "live", "ticks": self._tick_count,
+                    "ltp": self._feed.current_price(s),
+                    "last_tick_ago": 1.0,
+                    "is_currency":  s.endswith("INR"),
+                    "is_commodity": s in MCX_SYMBOLS,
+                }
+
+        if not scanner_meta:
+            return
+
+        # 1. Signal scan (rules-based, zero cost)
+        scan_results = self._signal_scanner.scan_all(
+            self._bar_history, self._regime, scanner_meta
+        )
+
+        # 2. Shortlist (rules-based, zero cost)
+        open_positions = await self._broker.get_positions()
+        broker_state   = self._broker.snapshot()
+        report = self._shortlister.run(
+            scan_results, scanner_meta, open_positions, self._regime,
+            kill_switch_active=self._broker.is_killed(),
+        )
+
+        scannable = sum(1 for r in scan_results.values() if r.scannable)
+        logger.info(
+            "AI brain  scannable=%d  shortlisted=%d  rejected=%d  mode=%s",
+            scannable, len(report.passed), len(report.rejected),
+            self._cost_throttle.mode,
+        )
+
+        if not report.passed:
+            return
+
+        # 3. Analyse + decide (LLM calls — may degrade to rules-only)
+        for entry in report.passed[:AI_BRAIN_MAX_PER_CYCLE]:
+            try:
+                payload  = self._analyst.build(
+                    entry, broker_state, self._regime,
+                    list(self._recent_signals),
+                    list(self._close_history.get(entry.symbol, [])),
+                )
+                decision = await self._decision_engine.decide(payload)
+
+                self._ai_decisions.appendleft({
+                    **decision.to_dict(),
+                    "shortlist_rank": entry.rank,
+                    "final_score":    round(entry.final_score, 4),
+                })
+
+                if decision.is_actionable:
+                    result = await self._action_executor.execute(decision, self._broker)
+                    logger.info(
+                        "AI BRAIN OPEN  %-8s  dir=%-5s  conv=%3d  qty=%d"
+                        "  sl=%.2f%%  tp=%.2f%%  src=%s  ok=%s",
+                        decision.symbol, decision.direction, decision.conviction,
+                        result.qty,
+                        decision.stop_loss_pct * 100, decision.take_profit_pct * 100,
+                        decision.source, result.success,
+                    )
+                else:
+                    logger.debug(
+                        "AI brain FLAT  %s  conv=%d  src=%s",
+                        decision.symbol, decision.conviction, decision.source,
+                    )
+            except Exception as exc:
+                logger.warning("AI brain decision error (%s): %s", entry.symbol, exc)
+
     async def _on_tick(self, symbol: str, ltp: float, volume: float) -> None:
         if not self._running:
             return
@@ -319,6 +431,17 @@ class JarvisEngine:
                 logger.info("feed alive  ticks=%d  %s=₹%.2f", self._tick_count, symbol, ltp)
             for bar in self._aggregator.update(symbol, ltp, volume, _utcnow()):
                 await self._on_bar(bar)
+            # AI brain: check exit conditions for this symbol on every tick
+            if self._ai_brain_enabled and symbol in self._trade_monitor.monitored_symbols:
+                exit_sig = self._trade_monitor.check(symbol, ltp)
+                if exit_sig:
+                    result = await self._action_executor.close(exit_sig, self._broker)
+                    logger.info(
+                        "AI BRAIN EXIT  %-8s  reason=%-12s  pnl=%.2f%%  qty=%d  ok=%s",
+                        symbol, exit_sig.reason,
+                        exit_sig.unrealised_pnl_pct * 100,
+                        result.qty, result.success,
+                    )
         except Exception as exc:
             logger.error("tick error %s: %s", symbol, exc)
 
@@ -326,6 +449,8 @@ class JarvisEngine:
         logger.debug("bar  %s %s  O=%.2f H=%.2f L=%.2f C=%.2f  vol=%d",
                      bar.timeframe, bar.symbol,
                      bar.open, bar.high, bar.low, bar.close, bar.volume)
+        # Accumulate bar history for AI signal scanner (OHLCV needed)
+        self._bar_history[bar.symbol].append(bar)
 
         self._bars_since_reclassify += 1
         if bar.timeframe == "5min" and self._bars_since_reclassify >= REGIME_RECLASSIFY_BARS:
@@ -477,6 +602,15 @@ class JarvisEngine:
                 "auto_select":      self._auto_select_enabled,
                 "selected_symbols": list(self._selected_symbols),
                 "updated_at":       self._intelligence_updated.isoformat(),
+            },
+            "ai_brain": {
+                "enabled":             self._ai_brain_enabled,
+                "mode":                self._cost_throttle.mode,
+                "daily_cost_usd":      round(self._router.daily_cost_usd, 6),
+                "daily_cost_inr":      round(self._router.daily_cost_usd * 84.0, 2),
+                "budget_pct_used":     self._cost_throttle.snapshot().pct_used,
+                "decisions":           list(self._ai_decisions)[:10],
+                "monitored_positions": self._trade_monitor.snapshot(),
             },
         }
 
@@ -745,6 +879,30 @@ async def _route(method: str, path: str, query: dict, body: dict) -> tuple[int, 
             _engine._selected_symbols = set(symbols)
             logger.info("Intelligence manual override: %s", symbols)
         return 200, {"status": "overridden", "selected_symbols": symbols}
+
+    if path == "/api/ai/brain":
+        if not _engine:
+            return 200, {"enabled": False, "decisions": [], "monitored_positions": {}}
+        snap = _engine._cost_throttle.snapshot()
+        return 200, {
+            "enabled":             _engine._ai_brain_enabled,
+            "mode":                _engine._cost_throttle.mode,
+            "cost_summary":        _engine._router.cost_summary(),
+            "budget": {
+                "daily_inr":   snap.budget_inr,
+                "spent_inr":   round(snap.spend_inr, 2),
+                "pct_used":    snap.pct_used,
+                "cache_saves": snap.total_saves,
+            },
+            "decisions":           list(_engine._ai_decisions)[:20],
+            "monitored_positions": _engine._trade_monitor.snapshot(),
+        }
+
+    if path == "/api/ai/brain/toggle" and method == "POST":
+        if _engine:
+            _engine._ai_brain_enabled = bool(body.get("enabled", True))
+            logger.info("AI brain %s by user", "ENABLED" if _engine._ai_brain_enabled else "DISABLED")
+        return 200, {"enabled": _engine._ai_brain_enabled if _engine else False}
 
     if path == "/api/instruments/scrip_status":
         from core.feeds.dhan_instruments import get_scrip_master
