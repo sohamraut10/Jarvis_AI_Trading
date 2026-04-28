@@ -73,9 +73,9 @@ SIGNAL_DEDUP_SECONDS   = 60
 WS_PORT   = 8765
 HTTP_PORT = 8766
 
-WATCH_SYMBOLS: list[str] = ["RELIANCE", "TCS", "INFY", "HDFCBANK", "SBIN"]
-# NSE currency futures — set to [] to disable, or add pairs: "EURINR", "GBPINR", "JPYINR"
-CURRENCY_SYMBOLS: list[str] = ["USDINR"]
+WATCH_SYMBOLS: list[str] = []   # no equities — trading currency only
+# NSE currency futures — set to [] to disable, or add pairs: "USDINR", "EURINR", "GBPINR", "JPYINR"
+CURRENCY_SYMBOLS: list[str] = ["GBPINR"]
 BASE_PRICES: dict[str, float] = {
     "RELIANCE": 2500.0, "TCS": 3800.0, "INFY": 1500.0,
     "HDFCBANK": 1700.0, "SBIN": 800.0,
