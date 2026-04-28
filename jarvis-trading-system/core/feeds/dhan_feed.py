@@ -88,6 +88,14 @@ class DhanFeed:
         self.last_tick_time: Optional[float] = None
         self._reconnects:    int            = 0
 
+        # Dynamic subscription support (populated in start())
+        self._id_to_sym:       dict[str, str]   = {}   # security_id → symbol
+        self._sub_list:        list[dict]        = []   # [{ExchangeSegment, SecurityId}, ...]
+        self._instrument_lot:  dict[str, int]    = {}   # symbol → lot_size
+        self._instrument_info: dict[str, dict]   = {}   # symbol → {segment, security_id, lot_size}
+        self._thread_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._current_ws  = None
+
     # ── Public scanner interface ───────────────────────────────────────────────
 
     def scanner_data(self) -> dict:
@@ -144,21 +152,21 @@ class DhanFeed:
             await self._fallback(tick_callback)
             return
 
-        id_to_sym: dict[str, str] = {sid: sym for sym, (_, sid) in instrument_map.items()}
-        sub_list = [
+        # Populate instance vars so dynamic add_instrument() works after startup
+        self._id_to_sym = {sid: sym for sym, (_, sid, _) in instrument_map.items()}
+        self._sub_list  = [
             {"ExchangeSegment": seg, "SecurityId": sid}
-            for _, (seg, sid) in instrument_map.items()
+            for _, (seg, sid, _) in instrument_map.items()
         ]
+        self._instrument_lot  = {sym: lot for sym, (_, _, lot) in instrument_map.items()}
+        self._instrument_info = {
+            sym: {"segment": seg, "security_id": sid, "lot_size": lot}
+            for sym, (seg, sid, lot) in instrument_map.items()
+        }
 
         logger.info("[Dhan] auto-discovery: subscribing to %d instruments — %s",
-                    len(sub_list),
-                    ", ".join(f"{s}({seg})" for s, (seg, _) in instrument_map.items()))
-
-        sub_msg = json.dumps({
-            "RequestCode": 15,
-            "InstrumentCount": len(sub_list),
-            "InstrumentList": sub_list,
-        })
+                    len(self._sub_list),
+                    ", ".join(f"{s}({seg})" for s, (seg, _, _) in instrument_map.items()))
 
         await self._preflight_check()
 
@@ -183,9 +191,9 @@ class DhanFeed:
             import asyncio as _asyncio
             thread_loop = _asyncio.new_event_loop()
             _asyncio.set_event_loop(thread_loop)
-            thread_loop.run_until_complete(
-                self._connect_loop(sub_msg, id_to_sym, _on_tick)
-            )
+            self._thread_loop = thread_loop   # saved for dynamic subscriptions
+            thread_loop.run_until_complete(self._connect_loop(_on_tick))
+            self._thread_loop = None
             logger.info("[Dhan] feed thread exiting")
             if self.ticks_received == 0 and self._running:
                 asyncio.run_coroutine_threadsafe(self._fallback(tick_callback), loop)
@@ -207,12 +215,7 @@ class DhanFeed:
             else:
                 logger.warning("[Dhan] DISCONNECTED  reconnects=%d", self._reconnects)
 
-    async def _connect_loop(
-        self,
-        sub_msg: str,
-        id_to_sym: dict[str, str],
-        on_tick: Callable,
-    ) -> None:
+    async def _connect_loop(self, on_tick: Callable) -> None:
         import websockets
 
         url = (
@@ -233,6 +236,7 @@ class DhanFeed:
             connect_ok = False
             try:
                 async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
+                    self._current_ws  = ws
                     self.connected    = True
                     self.connect_time = time.time()
                     self._reconnects += 1
@@ -246,8 +250,15 @@ class DhanFeed:
                     except asyncio.TimeoutError:
                         pass
 
+                    # Build sub msg from current instance vars (includes dynamically added)
+                    sub_msg = json.dumps({
+                        "RequestCode": 15,
+                        "InstrumentCount": len(self._sub_list),
+                        "InstrumentList": self._sub_list,
+                    })
                     await ws.send(sub_msg)
-                    logger.info("[Dhan] subscription sent — waiting for ticks…")
+                    logger.info("[Dhan] subscription sent (%d instruments) — waiting for ticks…",
+                                len(self._sub_list))
 
                     while self._running:
                         try:
@@ -267,7 +278,7 @@ class DhanFeed:
                             continue
 
                         sid = str(tick.get("security_id", ""))
-                        sym = id_to_sym.get(sid)
+                        sym = self._id_to_sym.get(sid)
                         if not sym:
                             continue
                         ltp = float(tick.get("LTP") or 0)
@@ -277,7 +288,8 @@ class DhanFeed:
 
             except Exception as exc:
                 was = self.connected
-                self.connected = False
+                self.connected   = False
+                self._current_ws = None
                 close_info = ""
                 if hasattr(exc, 'rcvd') and exc.rcvd:
                     close_info = f"  ws_code={exc.rcvd.code}  reason={exc.rcvd.reason!r}"
@@ -290,6 +302,9 @@ class DhanFeed:
                     if not connect_ok and elapsed < 2:
                         fast_fails += 1
                 logger.error("[Dhan] disconnected: %s%s%s", exc, close_info, uptime)
+            else:
+                self._current_ws = None
+                self.connected   = False
 
             if not self._running:
                 break
@@ -304,6 +319,72 @@ class DhanFeed:
             wait = min(10 * attempt, 60)
             logger.warning("[Dhan] retrying in %ds", wait)
             await asyncio.sleep(wait)
+
+    # ── Dynamic subscription ───────────────────────────────────────────────────
+
+    async def add_instrument(
+        self,
+        exchange_segment: str,
+        security_id: str,
+        symbol: str,
+        lot_size: int = 1,
+    ) -> bool:
+        """Subscribe to a new instrument on the live WS connection (or queue for next connect)."""
+        sid = str(security_id)
+        if sid in self._id_to_sym:
+            logger.info("[Dhan] %s already subscribed", symbol)
+            return True
+
+        entry = {"ExchangeSegment": exchange_segment, "SecurityId": sid}
+        self._id_to_sym[sid] = symbol
+        self._instrument_lot[symbol] = lot_size
+        self._instrument_info[symbol] = {
+            "segment": exchange_segment, "security_id": sid, "lot_size": lot_size,
+        }
+        if entry not in self._sub_list:
+            self._sub_list.append(entry)
+        if symbol not in self._all_symbols:
+            self._all_symbols.append(symbol)
+            self._sym_ticks[symbol] = 0
+
+        if self._current_ws is not None and self._thread_loop is not None:
+            sub_msg = json.dumps({
+                "RequestCode": 15,
+                "InstrumentCount": 1,
+                "InstrumentList": [entry],
+            })
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    self._current_ws.send(sub_msg), self._thread_loop
+                )
+                future.result(timeout=5)
+                logger.info("[Dhan] dynamically subscribed: %s (%s/%s)", symbol, exchange_segment, sid)
+                return True
+            except Exception as exc:
+                logger.error("[Dhan] dynamic subscribe error: %s", exc)
+                return False
+
+        logger.info("[Dhan] queued for next connection: %s (%s/%s)", symbol, exchange_segment, sid)
+        return True
+
+    def remove_symbol(self, sym: str) -> None:
+        """Stop processing ticks for a symbol (WS unsub not supported by Dhan — we just ignore ticks)."""
+        sids = {k for k, v in self._id_to_sym.items() if v == sym}
+        for sid in sids:
+            del self._id_to_sym[sid]
+        self._sub_list = [e for e in self._sub_list if e["SecurityId"] not in sids]
+        self._instrument_lot.pop(sym, None)
+        self._instrument_info.pop(sym, None)
+        if sym in self._all_symbols:
+            self._all_symbols.remove(sym)
+        self._sym_ticks.pop(sym, None)
+        self._sym_last_tick.pop(sym, None)
+        self._sym_ltp.pop(sym, None)
+        self._ltp.pop(sym, None)
+        logger.info("[Dhan] removed symbol: %s", sym)
+
+    def lot_size(self, sym: str) -> int:
+        return self._instrument_lot.get(sym, 1)
 
     async def _preflight_check(self) -> None:
         import requests

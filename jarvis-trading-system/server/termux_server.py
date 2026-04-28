@@ -336,8 +336,13 @@ class JarvisEngine:
 
         available = await self._broker.get_available_capital()
         stats = strategy.get_stats()
-        # Currency futures trade in lots of 1000 units minimum
-        lot_size = 1000 if signal.symbol.endswith("INR") else 1
+        # Use instrument's actual lot size; fall back to currency heuristic
+        if hasattr(self._feed, "lot_size"):
+            lot_size = self._feed.lot_size(signal.symbol)
+            if lot_size == 1 and signal.symbol.endswith("INR"):
+                lot_size = 1000  # fallback for SimulatedFeed
+        else:
+            lot_size = 1000 if signal.symbol.endswith("INR") else 1
         qty = self._kelly_sizer.size(stats, ltp, available, lot_size=lot_size)
         if qty == 0:
             logger.info("   Kelly → qty=0  (win_rate=%.0f%%  n=%d  available=₹%.0f) — no trade",
@@ -581,6 +586,74 @@ async def _route(method: str, path: str, query: dict, body: dict) -> tuple[int, 
             for sid in _engine._strategies
         }
 
+    if path == "/api/instruments/search":
+        from core.feeds.dhan_instruments import search_instruments, get_scrip_master
+        sm = get_scrip_master()
+        if not sm.is_loaded():
+            return 200, {"results": [], "loading": True}
+        q = query.get("q", [""])[0].strip()
+        segs_param = query.get("segments", [None])[0]
+        segments = segs_param.split(",") if segs_param else None
+        limit = int(query.get("limit", ["30"])[0])
+        if not q:
+            return 200, {"results": []}
+        results = search_instruments(q, segments=segments, limit=limit)
+        return 200, {"results": results}
+
+    if path == "/api/instruments/subscribe" and method == "POST":
+        security_id      = str(body.get("security_id", "")).strip()
+        exchange_segment = str(body.get("exchange_segment", "")).strip()
+        symbol           = str(body.get("symbol", "")).strip()
+        lot_size         = int(body.get("lot_size", 1))
+        if not all([security_id, exchange_segment, symbol]):
+            return 400, {"error": "security_id, exchange_segment, symbol required"}
+        if _engine and hasattr(_engine._feed, "add_instrument"):
+            ok = await _engine._feed.add_instrument(exchange_segment, security_id, symbol, lot_size)
+            logger.info("User subscribed: %s (%s/%s) lot=%d", symbol, exchange_segment, security_id, lot_size)
+            return 200, {"status": "subscribed" if ok else "queued", "symbol": symbol}
+        return 200, {"status": "no_live_feed"}
+
+    if path == "/api/instruments/unsubscribe" and method == "POST":
+        symbol = str(body.get("symbol", "")).strip()
+        if not symbol:
+            return 400, {"error": "symbol required"}
+        if _engine and hasattr(_engine._feed, "remove_symbol"):
+            _engine._feed.remove_symbol(symbol)
+            logger.info("User unsubscribed: %s", symbol)
+        return 200, {"status": "ok"}
+
+    if path == "/api/instruments/watchlist":
+        if not _engine:
+            return 200, {"instruments": []}
+        scanner = {}
+        if hasattr(_engine._feed, "scanner_data"):
+            scanner = _engine._feed.scanner_data()
+        # Merge with instrument_info for badge / segment details
+        from core.feeds.dhan_instruments import get_scrip_master
+        sm = get_scrip_master()
+        instruments = []
+        info_map = getattr(_engine._feed, "_instrument_info", {})
+        id_to_sym = getattr(_engine._feed, "_id_to_sym", {})
+        for sym, scan in scanner.items():
+            entry: dict = {"symbol": sym, **scan}
+            info = info_map.get(sym, {})
+            entry["security_id"] = info.get("security_id", "")
+            entry["segment"]     = info.get("segment", "")
+            entry["lot_size"]    = info.get("lot_size", 1)
+            if info.get("security_id") and sm.is_loaded():
+                inst = sm.get_by_sid(info["security_id"])
+                if inst:
+                    entry["badge"]     = inst.get("badge")
+                    entry["seg_label"] = inst.get("seg_label")
+                    entry["display"]   = inst.get("display")
+            instruments.append(entry)
+        return 200, {"instruments": instruments}
+
+    if path == "/api/instruments/scrip_status":
+        from core.feeds.dhan_instruments import get_scrip_master
+        sm = get_scrip_master()
+        return 200, (sm.stats() if sm.is_loaded() else {"total": 0, "loading": True})
+
     if path == "/api/position/close" and method == "POST":
         symbol  = body.get("symbol")
         all_pos = body.get("all", False)
@@ -703,6 +776,18 @@ async def main() -> None:
 
     pathlib.Path(cfg["intent_log_path"]).parent.mkdir(parents=True, exist_ok=True)
     pathlib.Path(cfg["pnl_db_path"]).parent.mkdir(parents=True, exist_ok=True)
+
+    # Load scrip master in background (non-blocking; search returns empty until done)
+    async def _load_scrip_bg():
+        from core.feeds.dhan_instruments import load_scrip_master
+        loop = asyncio.get_event_loop()
+        ok = await loop.run_in_executor(None, load_scrip_master)
+        if ok:
+            from core.feeds.dhan_instruments import get_scrip_master
+            logger.info("[ScripMaster] ready — %d instruments indexed", get_scrip_master().stats()["total"])
+        else:
+            logger.warning("[ScripMaster] failed to load — instrument search unavailable")
+    asyncio.create_task(_load_scrip_bg())
 
     feed = _build_feed(cfg)
     _engine = JarvisEngine(

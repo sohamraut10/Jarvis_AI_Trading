@@ -168,104 +168,182 @@ function KillSwitchPanel({ killed, onKill, onReset }) {
   );
 }
 
-// ── Watchlist panel ───────────────────────────────────────────────────────────
+// ── Instrument Picker ─────────────────────────────────────────────────────────
 
-function WatchlistPanel() {
-  const [equity,    setEquity]    = useState([]);
-  const [currency,  setCurrency]  = useState([]);
-  const [available, setAvailable] = useState({ equity: [], currency: [] });
-  const [saving,    setSaving]    = useState(false);
-  const [saved,     setSaved]     = useState(false);
-  const [adding,    setAdding]    = useState(false);
+const STATUS_DOT = {
+  live:      "bg-green-400 animate-pulse",
+  stale:     "bg-yellow-500",
+  searching: "bg-cyan-500 animate-pulse",
+  offline:   "bg-gray-700",
+};
+const STATUS_TEXT = {
+  live: "text-green-400", stale: "text-yellow-500",
+  searching: "text-cyan-400", offline: "text-gray-600",
+};
+const BADGE_CLS = {
+  EQ:  "text-blue-400 border-blue-800 bg-blue-950/30",
+  FUT: "text-orange-400 border-orange-800 bg-orange-950/30",
+  OPT: "text-purple-400 border-purple-800 bg-purple-950/30",
+  IDX: "text-gray-400 border-gray-700 bg-gray-900/30",
+};
 
-  useEffect(() => {
-    fetch("/api/symbols")
+function InstrumentPicker({ snapshot }) {
+  const [query,     setQuery]     = useState("");
+  const [results,   setResults]   = useState([]);
+  const [searching, setSearching] = useState(false);
+  const [watchlist, setWatchlist] = useState([]);
+  const debounceRef = useRef(null);
+
+  const loadWatchlist = useCallback(() => {
+    fetch("/api/instruments/watchlist")
       .then((r) => r.json())
-      .then((d) => {
-        setEquity(d.equity ?? []);
-        setCurrency(d.currency ?? []);
-        setAvailable({ equity: d.available_equity ?? [], currency: d.available_currency ?? [] });
-      })
+      .then((d) => setWatchlist(d.instruments ?? []))
       .catch(() => {});
   }, []);
 
-  const removeEquity = (sym) => setEquity((p) => p.filter((s) => s !== sym));
-  const addEquity    = (sym) => { if (!equity.includes(sym)) setEquity((p) => [...p, sym]); };
-  const toggleCurr   = (sym) => setCurrency((p) =>
-    p.includes(sym) ? p.filter((s) => s !== sym) : [...p, sym]
-  );
+  useEffect(() => { loadWatchlist(); }, [loadWatchlist]);
 
-  const save = async () => {
-    setSaving(true);
-    try {
-      await fetch("/api/symbols", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ equity, currency }),
-      });
-      setSaved(true);
-      setTimeout(() => setSaved(false), 3000);
-    } finally {
-      setSaving(false);
-    }
+  // Merge live scanner data into watchlist entries
+  const scanner = snapshot?.scanner ?? {};
+  const enriched = watchlist.map((inst) => ({ ...inst, ...(scanner[inst.symbol] ?? {}) }));
+
+  // Debounced search
+  useEffect(() => {
+    clearTimeout(debounceRef.current);
+    if (!query.trim()) { setResults([]); return; }
+    debounceRef.current = setTimeout(async () => {
+      setSearching(true);
+      try {
+        const r = await fetch(`/api/instruments/search?q=${encodeURIComponent(query.trim())}&limit=25`);
+        const d = await r.json();
+        setResults(d.results ?? []);
+      } catch {
+        setResults([]);
+      } finally {
+        setSearching(false);
+      }
+    }, 300);
+    return () => clearTimeout(debounceRef.current);
+  }, [query]);
+
+  const subscribe = async (inst) => {
+    await fetch("/api/instruments/subscribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        security_id:      inst.security_id,
+        exchange_segment: inst.segment,
+        symbol:           inst.symbol,
+        lot_size:         inst.lot_size ?? 1,
+      }),
+    }).catch(() => {});
+    setQuery("");
+    setResults([]);
+    setTimeout(loadWatchlist, 600);
   };
 
-  const addable = available.equity.filter((s) => !equity.includes(s));
+  const unsubscribe = async (sym) => {
+    await fetch("/api/instruments/unsubscribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ symbol: sym }),
+    }).catch(() => {});
+    setWatchlist((p) => p.filter((i) => i.symbol !== sym));
+  };
+
+  const subscribedSyms = new Set(enriched.map((e) => e.symbol));
+  const filteredResults = results.filter((r) => !subscribedSyms.has(r.symbol));
 
   return (
-    <div className="space-y-4">
-      <div>
-        <div className="text-[10px] text-gray-500 uppercase tracking-widest mb-2">Equities</div>
-        <div className="flex flex-wrap gap-2 mb-2">
-          {equity.map((sym) => (
-            <span key={sym} className="flex items-center gap-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200 font-mono">
-              {sym}
-              <button onClick={() => removeEquity(sym)}
-                className="text-gray-600 hover:text-red-400 transition-colors ml-1 font-bold">×</button>
-            </span>
-          ))}
-          {addable.length > 0 && !adding && (
-            <button onClick={() => setAdding(true)}
-              className="bg-gray-800 border border-dashed border-gray-700 rounded px-2 py-1 text-xs text-gray-500 hover:border-cyan-700 hover:text-cyan-500 transition-colors">
-              + Add
-            </button>
-          )}
-        </div>
-        {adding && (
-          <div className="flex flex-wrap gap-1">
-            {addable.map((sym) => (
-              <button key={sym} onClick={() => { addEquity(sym); setAdding(false); }}
-                className="bg-cyan-900/30 border border-cyan-800 rounded px-2 py-1 text-xs text-cyan-400 font-mono hover:bg-cyan-900/50 transition-colors">
-                {sym}
-              </button>
-            ))}
-            <button onClick={() => setAdding(false)}
-              className="text-[10px] text-gray-600 hover:text-gray-400 px-2">cancel</button>
-          </div>
+    <div className="space-y-3">
+      {/* Search input */}
+      <div className="relative">
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search NIFTY, GBPINR, RELIANCE, BANKNIFTY…"
+          className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-xs text-gray-200
+                     font-mono focus:outline-none focus:border-cyan-700 placeholder-gray-600"
+        />
+        {searching && (
+          <span className="absolute right-3 top-2.5 text-[9px] text-cyan-600 animate-pulse">
+            searching…
+          </span>
         )}
       </div>
 
-      <div>
-        <div className="text-[10px] text-gray-500 uppercase tracking-widest mb-2">Currency Futures (NSE)</div>
-        <div className="grid grid-cols-2 gap-2">
-          {(available.currency.length ? available.currency : ["USDINR", "EURINR", "GBPINR", "JPYINR"]).map((sym) => (
-            <label key={sym} className="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" checked={currency.includes(sym)}
-                onChange={() => toggleCurr(sym)} className="accent-cyan-500 w-3.5 h-3.5" />
-              <span className="text-xs text-gray-300 font-mono">{sym}</span>
-            </label>
-          ))}
+      {/* Search results dropdown */}
+      {filteredResults.length > 0 && (
+        <div className="border border-gray-700 rounded overflow-hidden max-h-52 overflow-y-auto">
+          {filteredResults.map((inst, i) => {
+            const badge = inst.badge ?? "EQ";
+            return (
+              <button
+                key={`${inst.security_id}-${i}`}
+                onClick={() => subscribe(inst)}
+                className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-800 transition-colors
+                           border-b border-gray-800 last:border-0 text-left"
+              >
+                <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded border tracking-widest shrink-0 ${BADGE_CLS[badge] ?? BADGE_CLS.EQ}`}>
+                  {badge}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs font-mono text-gray-200 truncate">
+                    {inst.display || inst.symbol}
+                  </div>
+                  <div className="text-[9px] text-gray-600">{inst.seg_label} · lot {inst.lot_size ?? 1}</div>
+                </div>
+                <span className="text-[9px] text-cyan-700 shrink-0">+ add</span>
+              </button>
+            );
+          })}
         </div>
-      </div>
+      )}
+      {query.trim() && !searching && filteredResults.length === 0 && results.length === 0 && (
+        <p className="text-[10px] text-gray-600 text-center">No results — scrip master may still be loading</p>
+      )}
 
-      <div className="flex items-center gap-3 pt-1">
-        <button onClick={save} disabled={saving}
-          className="px-4 py-1.5 rounded border border-cyan-700 bg-cyan-900/30 text-cyan-300 text-xs
-                     font-bold tracking-widest hover:bg-cyan-900/50 transition-all disabled:opacity-50">
-          {saving ? "SAVING…" : "SAVE"}
-        </button>
-        {saved && <span className="text-[10px] text-yellow-400">Saved — restart to apply</span>}
-      </div>
+      {/* Active instruments */}
+      {enriched.length === 0 ? (
+        <p className="text-xs text-gray-600 text-center py-2">No instruments subscribed</p>
+      ) : (
+        <div className="space-y-1">
+          <div className="text-[9px] text-gray-700 uppercase tracking-widest mb-1">Active instruments</div>
+          {enriched.map((inst) => {
+            const status = inst.status ?? "searching";
+            const badge  = inst.badge ?? (inst.is_currency ? "FUT" : "EQ");
+            const priceStr = inst.ltp != null
+              ? (inst.is_currency ? inst.ltp.toFixed(4) : `₹${inst.ltp.toFixed(2)}`)
+              : "—";
+            return (
+              <div key={inst.symbol}
+                className="flex items-center gap-2 bg-gray-800/50 border border-gray-800 rounded px-2 py-1.5">
+                <span className={`w-2 h-2 rounded-full shrink-0 ${STATUS_DOT[status] ?? STATUS_DOT.searching}`} />
+                <span className={`text-[8px] font-bold px-1 py-0.5 rounded border tracking-widest shrink-0 ${BADGE_CLS[badge] ?? BADGE_CLS.EQ}`}>
+                  {badge}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs font-mono text-gray-200 truncate">
+                    {inst.display || inst.symbol}
+                  </div>
+                  {inst.seg_label && (
+                    <div className="text-[9px] text-gray-700">{inst.seg_label}</div>
+                  )}
+                </div>
+                <span className={`text-xs font-mono tabular-nums ${STATUS_TEXT[status] ?? STATUS_TEXT.searching}`}>
+                  {priceStr}
+                </span>
+                <button onClick={() => unsubscribe(inst.symbol)}
+                  className="shrink-0 w-5 h-5 flex items-center justify-center text-gray-700
+                             hover:text-red-400 transition-colors font-bold text-base leading-none">
+                  ×
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -473,9 +551,9 @@ export default function ControlRoom({
           fmt={(v) => `${v}s`} />
       </Section>
 
-      {/* ── Watchlist ────────────────────────────────────────────── */}
-      <Section title="Watchlist" badge={RESTART}>
-        <WatchlistPanel />
+      {/* ── Instrument Picker ───────────────────────────────────── */}
+      <Section title="Instrument Picker" badge={IMMEDIATE}>
+        <InstrumentPicker snapshot={snapshot} />
       </Section>
 
       {/* ── Strategies ───────────────────────────────────────────── */}
