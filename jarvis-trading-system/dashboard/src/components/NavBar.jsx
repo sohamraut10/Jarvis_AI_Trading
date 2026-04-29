@@ -7,6 +7,7 @@ const VIEWS = [
   { id: "brain",   label: "Brain Analytics" },
   { id: "control", label: "Control Room" },
   { id: "log",     label: "Command Log" },
+  { id: "chart",   label: "Live Chart" },
 ];
 
 export { VIEWS };

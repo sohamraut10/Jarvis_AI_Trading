@@ -1016,6 +1016,83 @@ async def _route(method: str, path: str, query: dict, body: dict) -> tuple[int, 
             "error":        _engine._discoverer.last_error(),
         }
 
+    if path.startswith("/api/charts/"):
+        symbol = path.split("/api/charts/")[-1].upper()
+        tf = query.get("tf", ["5min"])[0]
+        if not _engine:
+            return 200, {"symbol": symbol, "timeframe": tf, "bars": [], "markers": []}
+
+        # OHLCV bars for the requested timeframe
+        raw_bars = [b for b in _engine._bar_history.get(symbol, []) if b.timeframe == tf]
+        bars = [
+            {
+                "time":   int(b.timestamp.replace(tzinfo=timezone.utc).timestamp()),
+                "open":   round(b.open,   4),
+                "high":   round(b.high,   4),
+                "low":    round(b.low,    4),
+                "close":  round(b.close,  4),
+                "volume": int(b.volume),
+            }
+            for b in raw_bars
+        ]
+
+        # Strategy signal markers
+        markers = []
+        for sig in _engine._recent_signals:
+            if sig.get("symbol") != symbol:
+                continue
+            try:
+                t = int(datetime.fromisoformat(sig["ts"]).replace(tzinfo=timezone.utc).timestamp())
+            except Exception:
+                continue
+            markers.append({
+                "time":       t,
+                "type":       "signal",
+                "side":       sig.get("side", ""),
+                "strategy":   sig.get("strategy", ""),
+                "price":      sig.get("entry"),
+                "confidence": sig.get("confidence"),
+                "label":      sig.get("strategy", ""),
+            })
+
+        # AI brain decision markers
+        for dec in _engine._ai_decisions:
+            if dec.get("symbol") != symbol:
+                continue
+            try:
+                t = int(datetime.fromisoformat(dec["ts"]).replace(tzinfo=timezone.utc).timestamp())
+            except Exception:
+                continue
+            markers.append({
+                "time":     t,
+                "type":     "decision",
+                "action":   dec.get("action", ""),
+                "model":    dec.get("model", ""),
+                "strategy": dec.get("strategy", ""),
+                "price":    dec.get("entry_price"),
+                "label":    dec.get("model", "AI"),
+            })
+
+        # Trade fill markers from broker
+        for fill in _engine._broker._fills:
+            if fill.symbol != symbol:
+                continue
+            try:
+                t = int(fill.timestamp.replace(tzinfo=timezone.utc).timestamp())
+            except Exception:
+                continue
+            markers.append({
+                "time":   t,
+                "type":   "trade",
+                "side":   fill.side.value,
+                "price":  round(fill.price, 4),
+                "qty":    fill.qty,
+                "label":  fill.side.value,
+            })
+
+        markers.sort(key=lambda m: m["time"])
+        return 200, {"symbol": symbol, "timeframe": tf, "bars": bars, "markers": markers}
+
     if path == "/api/ai/brain":
         if not _engine:
             return 200, {"enabled": False, "decisions": [], "monitored_positions": {}}

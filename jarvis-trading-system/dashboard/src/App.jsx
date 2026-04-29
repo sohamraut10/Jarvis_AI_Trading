@@ -14,6 +14,7 @@ import ControlRoom from "./views/ControlRoom";
 import MissionControl from "./views/MissionControl";
 import StrategyArena from "./views/StrategyArena";
 import TradeLedger from "./views/TradeLedger";
+import ChartView from "./views/ChartView";
 
 const WS_URL =
   import.meta.env.VITE_WS_URL ??
@@ -162,6 +163,7 @@ export default function App() {
           />
         )}
         {view === "log" && <CommandLog />}
+        {view === "chart" && <ChartView snapshot={snapshot} />}
       </main>
 
       <NotificationStack banners={notifs.banners} onDismiss={notifs.dismiss} />
