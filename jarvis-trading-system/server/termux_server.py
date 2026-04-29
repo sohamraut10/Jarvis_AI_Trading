@@ -715,9 +715,10 @@ async def _route(method: str, path: str, query: dict, body: dict) -> tuple[int, 
                 raw = json.loads(SETTINGS_FILE.read_text())
             except Exception:
                 pass
+        _SECRET_KEYS = ("dhan_access_token", "anthropic_api_key", "openai_api_key", "google_api_key")
         return 200, {**raw,
                      "dhan_client_id":    _mask(raw.get("dhan_client_id", "")),
-                     "dhan_access_token": "•" * 8 if raw.get("dhan_access_token") else ""}
+                     **{k: "•" * 8 if raw.get(k) else "" for k in _SECRET_KEYS}}
     if path == "/api/settings" and method == "POST":
         SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
         existing: dict = {}
@@ -727,12 +728,18 @@ async def _route(method: str, path: str, query: dict, body: dict) -> tuple[int, 
             except Exception:
                 pass
         merged = {**existing, **body}
-        for k in ("dhan_client_id", "dhan_access_token"):
+        # Don't overwrite stored secrets with masked placeholder values
+        _SECRET_KEYS = ("dhan_client_id", "dhan_access_token",
+                        "anthropic_api_key", "openai_api_key", "google_api_key")
+        for k in _SECRET_KEYS:
             if "•" in str(merged.get(k, "")):
                 merged[k] = existing.get(k, "")
         SETTINGS_FILE.write_text(json.dumps(merged, indent=2))
-        restart_required = bool({"initial_capital", "paper_mode", "hmm_states",
-                                  "ws_port", "pnl_db_path", "intent_log_path"} & set(body.keys()))
+        _RESTART_KEYS = {"initial_capital", "paper_mode", "hmm_states", "ws_port",
+                         "pnl_db_path", "intent_log_path",
+                         "anthropic_api_key", "openai_api_key", "google_api_key",
+                         "gemini_free_tier"}
+        restart_required = bool(_RESTART_KEYS & set(body.keys()))
         if _engine:
             ic  = float(merged.get("initial_capital", 10000))
             ksp = float(merged.get("kill_switch_pct", 0.03))
@@ -1024,6 +1031,20 @@ async def main() -> None:
         level=getattr(logging, cfg.get("log_level", "INFO"), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
+    # Inject settings-stored LLM API keys into env vars (only if not already set externally)
+    import os
+    for env_var, cfg_key in [
+        ("ANTHROPIC_API_KEY", "anthropic_api_key"),
+        ("OPENAI_API_KEY",    "openai_api_key"),
+        ("GOOGLE_API_KEY",    "google_api_key"),
+    ]:
+        val = cfg.get(cfg_key, "").strip()
+        if val and not os.environ.get(env_var):
+            os.environ[env_var] = val
+            logger.info("Loaded %s from settings.json", env_var)
+    if cfg.get("gemini_free_tier"):
+        os.environ.setdefault("GEMINI_FREE_TIER", "true")
 
     # Override symbol lists from settings if saved via frontend
     if "watch_symbols" in cfg and cfg["watch_symbols"]:
