@@ -804,6 +804,46 @@ async def _route(method: str, path: str, query: dict, body: dict) -> tuple[int, 
         return 200, (_engine.snapshot() if _engine else {"error": "not ready"})
     if path == "/api/pnl":
         return 200, (await _engine._pnl_tracker.get_session_summary() if _engine else {"error": "not ready"})
+
+    if path == "/api/trades":
+        if not _engine:
+            return 200, {"trades": [], "open_positions": []}
+        # All fills from the broker (every entry and exit)
+        fills = [
+            {
+                "timestamp":   f.filled_at.isoformat(),
+                "symbol":      f.symbol,
+                "side":        f.side.value,
+                "qty":         f.qty,
+                "entry_price": round(f.price, 4),
+                "exit_price":  None,
+                "pnl":         None,
+                "strategy":    f.strategy_id or "",
+                "regime":      "",
+            }
+            for f in _engine._broker._fills
+        ]
+        # Enrich with realized P&L from position close events
+        pos_pnl: dict[str, float] = {
+            sym: round(pos.realized_pnl, 2)
+            for sym, pos in _engine._broker._positions.items()
+            if pos.realized_pnl != 0
+        }
+        # Open positions
+        open_pos = [
+            {
+                "symbol":      sym,
+                "qty":         pos.qty,
+                "avg_price":   round(pos.avg_price, 4),
+                "ltp":         round(_engine._broker._ltp.get(sym, pos.avg_price), 4),
+                "unrealized":  round(pos.unrealized_pnl, 2),
+                "realized":    round(pos.realized_pnl, 2),
+            }
+            for sym, pos in _engine._broker._positions.items()
+            if pos.qty != 0
+        ]
+        return 200, {"trades": fills, "open_positions": open_pos, "realized_by_symbol": pos_pnl}
+
     if path == "/api/equity":
         return 200, (await _engine._pnl_tracker.get_equity_curve(days=30) if _engine else {"error": "not ready"})
     if path == "/api/intent":
