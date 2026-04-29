@@ -115,10 +115,14 @@ function MarketScanner({ scanner, connected, onSearchOpen }) {
   const liveCount   = liveEntries.length;
   const totalCount  = allEntries.length;
 
-  // Only render pairs that are actually receiving ticks right now
-  const currency    = liveEntries.filter(([, d]) =>  d.is_currency);
-  const commodities = liveEntries.filter(([, d]) =>  d.is_commodity && !d.is_currency);
-  const equities    = liveEntries.filter(([, d]) => !d.is_currency && !d.is_commodity);
+  // Render all instruments, live first then stale → searching → offline
+  const STATUS_ORDER = { live: 0, stale: 1, searching: 2, offline: 3 };
+  const sortedEntries = [...allEntries].sort(([, a], [, b]) =>
+    (STATUS_ORDER[a.status] ?? 2) - (STATUS_ORDER[b.status] ?? 2)
+  );
+  const currency    = sortedEntries.filter(([, d]) =>  d.is_currency);
+  const commodities = sortedEntries.filter(([, d]) =>  d.is_commodity && !d.is_currency);
+  const equities    = sortedEntries.filter(([, d]) => !d.is_currency && !d.is_commodity);
 
   return (
     <div className="bg-gray-900 border border-gray-800 rounded p-4">
@@ -131,7 +135,7 @@ function MarketScanner({ scanner, connected, onSearchOpen }) {
           <span className={`w-1.5 h-1.5 rounded-full ${connected ? "bg-green-500 animate-pulse" : "bg-gray-600"}`} />
           <span className="text-[9px] text-gray-600 font-mono">
             {connected
-              ? liveCount > 0 ? `${liveCount} live` : totalCount > 0 ? "market closed" : "scanning"
+              ? liveCount > 0 ? `${liveCount} live` : totalCount > 0 ? "no ticks" : "scanning"
               : "disconnected"}
           </span>
           {onSearchOpen && (
@@ -161,13 +165,6 @@ function MarketScanner({ scanner, connected, onSearchOpen }) {
       {totalCount === 0 ? (
         <div className="text-xs text-gray-600 text-center py-4 animate-pulse">
           Discovering available pairs…
-        </div>
-      ) : liveCount === 0 ? (
-        <div className="py-4 text-center space-y-1">
-          <div className="text-xs text-gray-600">Market closed</div>
-          <div className="text-[9px] text-gray-700">
-            {totalCount} pair{totalCount !== 1 ? "s" : ""} subscribed · waiting for ticks
-          </div>
         </div>
       ) : (
         <>
