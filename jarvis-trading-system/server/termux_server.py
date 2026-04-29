@@ -92,16 +92,18 @@ AI_BRAIN_INTERVAL_S    = 300    # re-run full pipeline every 5 min
 AI_BRAIN_MAX_PER_CYCLE = 2 if _TERMUX else 3        # fewer LLM calls on Android (cost + latency)
 
 WATCH_SYMBOLS: list[str] = []   # populated by auto-discovery (NSE equities)
-CURRENCY_SYMBOLS: list[str] = []   # disabled — focus on NSE equities
-MCX_SYMBOLS: list[str] = []        # disabled — focus on NSE equities
+CURRENCY_SYMBOLS: list[str] = ["USDINR", "EURINR", "GBPINR", "JPYINR"]  # NSE currency futures
+MCX_SYMBOLS: list[str] = []        # disabled — focus on NSE equities + currency
 BASE_PRICES: dict[str, float] = {
     "RELIANCE": 2500.0, "TCS": 3800.0, "INFY": 1500.0,
     "HDFCBANK": 1700.0, "SBIN": 800.0,
-    # Currency pair base prices (INR per unit, used only by SimulatedFeed)
     "USDINR": 84.0, "EURINR": 90.0, "GBPINR": 105.0, "JPYINR": 0.55,
-    # MCX commodity base prices (INR per lot unit, SimulatedFeed only)
     "CRUDEOIL": 6500.0, "GOLD": 72000.0, "SILVER": 88000.0,
     "NATURALGAS": 230.0, "COPPER": 780.0,
+}
+# Lot sizes for currency futures (NSE standard)
+CURRENCY_LOT_SIZES: dict[str, int] = {
+    "USDINR": 1000, "EURINR": 1000, "GBPINR": 1000, "JPYINR": 100_000,
 }
 _TF_MAP: dict[str, list[str]] = {
     "1min": ["vwap_breakout"],
@@ -631,13 +633,13 @@ class JarvisEngine:
 
         available = await self._broker.get_available_capital()
         stats = strategy.get_stats()
-        # Use instrument's actual lot size; fall back to currency heuristic
+        # Use instrument's actual lot size (scrip master > currency map > equity default)
         if hasattr(self._feed, "lot_size"):
             lot_size = self._feed.lot_size(signal.symbol)
-            if lot_size == 1 and signal.symbol.endswith("INR"):
-                lot_size = 1000  # fallback for SimulatedFeed
         else:
-            lot_size = 1000 if signal.symbol.endswith("INR") else 1
+            lot_size = 1
+        if lot_size <= 1:
+            lot_size = CURRENCY_LOT_SIZES.get(signal.symbol, 1)
         qty = self._kelly_sizer.size(stats, ltp, available, lot_size=lot_size)
         if qty == 0:
             logger.info("   Kelly → qty=0  (win_rate=%.0f%%  n=%d  available=₹%.0f) — no trade",

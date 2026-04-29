@@ -62,15 +62,22 @@ SCAN_EQUITY: list[str] = list(dict.fromkeys(
     NIFTY50 + NIFTY_BANK + NIFTY_MIDCAP_EXTRAS + FNO_EXTRAS + ETF_UNIVERSE
 ))
 
-SCAN_ALL: list[str] = SCAN_EQUITY   # MCX and currency disabled
+SCAN_ALL: list[str] = SCAN_EQUITY + CURRENCY_FUTURES   # MCX disabled; currency enabled
 
-# Default Dhan exchange segment per symbol (NSE equities only)
+# Default Dhan exchange segment per symbol
 SEGMENT_MAP: dict[str, str] = {
-    **{s: "NSE_EQ" for s in SCAN_EQUITY},
+    **{s: "NSE_EQ"   for s in SCAN_EQUITY},
+    **{s: "NSE_CURR" for s in CURRENCY_FUTURES},
+}
+
+# Lot sizes for currency futures
+CURRENCY_LOT_SIZES: dict[str, int] = {
+    "USDINR": 1000, "EURINR": 1000, "GBPINR": 1000, "JPYINR": 100_000,
 }
 
 # Human-readable asset class labels
 ASSET_CLASS: dict[str, str] = {
-    **{s: "Equity" for s in NIFTY50 + NIFTY_BANK + NIFTY_MIDCAP_EXTRAS + FNO_EXTRAS},
-    **{s: "ETF"    for s in ETF_UNIVERSE},
+    **{s: "Equity"   for s in NIFTY50 + NIFTY_BANK + NIFTY_MIDCAP_EXTRAS + FNO_EXTRAS},
+    **{s: "ETF"      for s in ETF_UNIVERSE},
+    **{s: "Currency" for s in CURRENCY_FUTURES},
 }
