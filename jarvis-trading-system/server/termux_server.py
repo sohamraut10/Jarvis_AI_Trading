@@ -82,29 +82,38 @@ def _load_settings() -> dict:
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-BROADCAST_INTERVAL_MS  = 1000 if _TERMUX else 500   # halve WS broadcast rate on Android
+BROADCAST_INTERVAL_MS  = 1000 if _TERMUX else 500
 REGIME_RECLASSIFY_BARS = 5
 SIGNAL_DEDUP_SECONDS   = 60
 WS_PORT   = 8765
 HTTP_PORT = 8766
-AI_BRAIN_WARMUP_S      = 90     # wait before first brain cycle (bars need to accumulate)
-AI_BRAIN_INTERVAL_S    = 300    # re-run full pipeline every 5 min
-AI_BRAIN_MAX_PER_CYCLE = 2 if _TERMUX else 3        # fewer LLM calls on Android (cost + latency)
+AI_BRAIN_WARMUP_S      = 90
+AI_BRAIN_INTERVAL_S    = 300
+AI_BRAIN_MAX_PER_CYCLE = 2 if _TERMUX else 3
 
-WATCH_SYMBOLS: list[str] = []   # populated by auto-discovery (NSE equities)
-CURRENCY_SYMBOLS: list[str] = ["USDINR", "EURINR", "GBPINR", "JPYINR"]  # NSE currency futures
-MCX_SYMBOLS: list[str] = []        # disabled — focus on NSE equities + currency
+# ── Forex symbols (yfinance / Yahoo Finance) ──────────────────────────────────
+FOREX_SYMBOLS: list[str] = [
+    "EURUSD", "GBPUSD", "USDJPY", "AUDUSD",
+    "USDCHF", "USDCAD", "NZDUSD",
+]
+FOREX_LOT_SIZES: dict[str, int] = {s: 1000 for s in FOREX_SYMBOLS}
+
+# Legacy NSE lists (kept for Dhan path; empty by default on local/yfinance mode)
+WATCH_SYMBOLS:    list[str] = []
+CURRENCY_SYMBOLS: list[str] = []
+MCX_SYMBOLS:      list[str] = []
+
+# Fallback base prices used by SimulatedFeed only
 BASE_PRICES: dict[str, float] = {
-    "RELIANCE": 2500.0, "TCS": 3800.0, "INFY": 1500.0,
-    "HDFCBANK": 1700.0, "SBIN": 800.0,
+    "EURUSD": 1.0820, "GBPUSD": 1.2720, "USDJPY": 149.50,
+    "AUDUSD": 0.6480, "USDCHF": 0.9010, "USDCAD": 1.3640,
+    "NZDUSD": 0.5980,
+    # Legacy NSE fallbacks
     "USDINR": 84.0, "EURINR": 90.0, "GBPINR": 105.0, "JPYINR": 0.55,
-    "CRUDEOIL": 6500.0, "GOLD": 72000.0, "SILVER": 88000.0,
-    "NATURALGAS": 230.0, "COPPER": 780.0,
+    "RELIANCE": 2500.0, "TCS": 3800.0, "INFY": 1500.0,
 }
-# Lot sizes for currency futures (NSE standard)
-CURRENCY_LOT_SIZES: dict[str, int] = {
-    "USDINR": 1000, "EURINR": 1000, "GBPINR": 1000, "JPYINR": 100_000,
-}
+CURRENCY_LOT_SIZES: dict[str, int] = {**FOREX_LOT_SIZES}   # unified lookup
+
 _TF_MAP: dict[str, list[str]] = {
     "1min": ["vwap_breakout"],
     "5min": ["ema_crossover", "orb_breakout", "rsi_momentum"],
@@ -720,18 +729,19 @@ class JarvisEngine:
             # SimulatedFeed — _symbols attr; mark all as live
             syms = getattr(self._feed, "_symbols", None) or getattr(self._feed, "_all_symbols", [])
             for s in syms:
+                is_forex = s in FOREX_SYMBOLS
                 scanner[s] = {"status": "live", "ticks": self._tick_count,
                                "ltp": self._feed.current_price(s),
                                "last_tick_ago": 1.0,
-                               "is_currency":  s.endswith("INR"),
+                               "is_currency":  is_forex or s.endswith("INR"),
                                "is_commodity": s in MCX_SYMBOLS,
-                               "exchange":     "MCX" if s in MCX_SYMBOLS else ("NSE_CURR" if s.endswith("INR") else "NSE")}
+                               "exchange":     "FOREX" if is_forex else ("MCX" if s in MCX_SYMBOLS else "NSE")}
         return {
             "type": "snapshot", "ts": _utcnow().isoformat(),
             "regime": str(self._regime), "regime_features": self._regime_features,
             "broker": self._broker.snapshot(), "allocations": self._allocations,
             "signals": list(self._recent_signals)[-10:],
-            "ltp": {s: round(v, 4) if s.endswith("INR") else round(v, 2)
+            "ltp": {s: round(v, 5) if s in FOREX_SYMBOLS or s.endswith("INR") else round(v, 2)
                     for s, v in self._broker._ltp.items()},
             "scanner": scanner,
             "intelligence": {
@@ -1310,28 +1320,40 @@ async def _handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
 
 def _build_feed(cfg: dict):
     """
-    Return DhanFeed if credentials are present, else SimulatedFeed.
-    Always uses PaperBroker — no real orders are placed either way.
+    Feed priority:
+      1. YFinanceFeed  — when feed_type="yfinance" (default on local, no account needed)
+      2. DhanFeed      — when dhan credentials are set in settings.json
+      3. SimulatedFeed — last resort fallback
     """
+    feed_type    = cfg.get("feed_type", "yfinance").strip().lower()
     client_id    = cfg.get("dhan_client_id", "").strip()
     access_token = cfg.get("dhan_access_token", "").strip()
 
-    if client_id and access_token:
+    # ── YFinance (default) ────────────────────────────────────────────────────
+    if feed_type == "yfinance":
+        try:
+            from core.feeds.yfinance_feed import YFinanceFeed
+            logger.info("Feed: YFinanceFeed  pairs=%s", ", ".join(FOREX_SYMBOLS))
+            return YFinanceFeed(FOREX_SYMBOLS)
+        except Exception as exc:
+            logger.warning("YFinanceFeed failed (%s) — falling back to SimulatedFeed", exc)
+
+    # ── Dhan live feed ────────────────────────────────────────────────────────
+    elif feed_type == "dhan" or (feed_type != "simulated" and client_id and access_token):
         try:
             from core.feeds.dhan_feed import DhanFeed
-            logger.info("Dhan credentials found — using live market feed (paper orders)")
-            if CURRENCY_SYMBOLS:
-                logger.info("Currency pairs: %s", ", ".join(CURRENCY_SYMBOLS))
-            if MCX_SYMBOLS:
-                logger.info("MCX commodities: %s", ", ".join(MCX_SYMBOLS))
+            logger.info("Feed: DhanFeed  equity=%s  currency=%s",
+                        ", ".join(WATCH_SYMBOLS) or "none",
+                        ", ".join(CURRENCY_SYMBOLS) or "none")
             return DhanFeed(client_id, access_token, WATCH_SYMBOLS,
                             currency_symbols=CURRENCY_SYMBOLS or None,
                             commodity_symbols=MCX_SYMBOLS or None)
         except Exception as exc:
-            logger.warning("Could not load DhanFeed (%s) — falling back to SimulatedFeed", exc)
+            logger.warning("DhanFeed failed (%s) — falling back to SimulatedFeed", exc)
 
-    all_syms = WATCH_SYMBOLS + CURRENCY_SYMBOLS + MCX_SYMBOLS
-    logger.info("No Dhan credentials — using SimulatedFeed")
+    # ── Simulated fallback ────────────────────────────────────────────────────
+    all_syms = FOREX_SYMBOLS or (WATCH_SYMBOLS + CURRENCY_SYMBOLS + MCX_SYMBOLS)
+    logger.info("Feed: SimulatedFeed  symbols=%s", ", ".join(all_syms))
     return SimulatedFeed(all_syms, BASE_PRICES)
 
 

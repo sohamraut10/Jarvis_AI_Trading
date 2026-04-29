@@ -8,6 +8,9 @@ python-dotenv==1.0.1
 pydantic==2.7.1
 pydantic-settings==2.2.1
 
+# ── Forex data feed (free, ~15s delay, no account needed) ────────────────────
+yfinance>=0.2.40
+
 # ── Dhan broker SDK ───────────────────────────────────────────────────────────
 dhanhq==2.0.1
 
