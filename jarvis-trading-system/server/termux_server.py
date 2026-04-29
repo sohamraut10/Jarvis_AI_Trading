@@ -335,15 +335,33 @@ class JarvisEngine:
 
     # ── Auto-discovery (market-wide NSE scan) ─────────────────────────────────
 
+    @staticmethod
+    def _equity_market_open_now() -> bool:
+        """Fast time-based check: NSE equity hours are Mon–Fri 09:15–15:30 IST."""
+        from datetime import timezone, timedelta
+        IST = timezone(timedelta(hours=5, minutes=30))
+        now = datetime.now(IST)
+        if now.weekday() >= 5:          # Saturday=5, Sunday=6
+            return False
+        t = now.hour * 60 + now.minute
+        return 555 <= t <= 930          # 09:15 → 15:30 in minutes
+
     async def _auto_discovery_loop(self) -> None:
-        """Every 5 min: scan NSE universe, rank top 10, subscribe them to the feed."""
+        """Scan NSE universe every 5 min during market hours; idle when closed."""
         await asyncio.sleep(30)   # brief startup grace period
         while self._running:
             try:
+                if not self._equity_market_open_now():
+                    # Market closed — update status flag but don't subscribe equities
+                    self._discovery_market_open = False
+                    logger.debug("[AutoDisc] equity market closed — skipping scan")
+                    await asyncio.sleep(1800)   # check again in 30 min
+                    continue
+
                 results = await self._discoverer.scan()
                 self._discovery_results      = [self._disc_to_dict(r) for r in results]
                 self._discovery_market_open  = self._discoverer.market_open()
-                if results:
+                if results and self._discovery_market_open:
                     await self._subscribe_discoveries(results)
             except Exception as exc:
                 logger.warning("auto-discovery loop error: %s", exc)
@@ -687,7 +705,17 @@ class JarvisEngine:
     def snapshot(self) -> dict:
         scanner = {}
         if hasattr(self._feed, "scanner_data"):
-            scanner = self._feed.scanner_data()
+            raw = self._feed.scanner_data()
+            # When equity market is closed, hide equity symbols that never received a tick
+            # (they'd just clutter the dashboard as endless "searching" entries)
+            mkt_open = self._equity_market_open_now()
+            for sym, data in raw.items():
+                is_currency  = sym in CURRENCY_SYMBOLS
+                is_commodity = sym in MCX_SYMBOLS
+                is_equity    = not is_currency and not is_commodity
+                if is_equity and not mkt_open and data.get("status") == "searching":
+                    continue    # don't show offline equities that never got a tick
+                scanner[sym] = data
         else:
             # SimulatedFeed — _symbols attr; mark all as live
             syms = getattr(self._feed, "_symbols", None) or getattr(self._feed, "_all_symbols", [])
