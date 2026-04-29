@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 Direction = Literal["long", "short", "flat"]
 
-WARMUP_BARS = 30   # minimum bars before any signal is computed
+WARMUP_BARS = 5    # minimum bars before any signal is computed
 
 # Signal weights in the composite vote
 _WEIGHTS: dict[str, float] = {

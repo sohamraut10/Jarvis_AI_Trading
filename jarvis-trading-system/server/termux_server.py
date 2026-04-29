@@ -595,7 +595,8 @@ class JarvisEngine:
             if sid in self._disabled_strategies:
                 logger.debug("strategy %s skipped (disabled by user)", sid)
                 continue
-            if not strat.is_active(self._regime):
+            # Allow all strategies during UNKNOWN regime (startup phase before enough bars)
+            if self._regime != Regime.UNKNOWN and not strat.is_active(self._regime):
                 logger.debug("strategy %s skipped (not active in %s)", sid, self._regime)
                 continue
             try:

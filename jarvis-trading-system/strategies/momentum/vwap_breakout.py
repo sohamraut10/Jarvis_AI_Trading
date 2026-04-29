@@ -32,7 +32,7 @@ class VWAPBreakout(BaseStrategy):
     ) -> None:
         super().__init__(
             strategy_id=strategy_id,
-            supported_regimes=[Regime.TRENDING_UP, Regime.HIGH_VOL],
+            supported_regimes=[Regime.TRENDING_UP, Regime.HIGH_VOL, Regime.SIDEWAYS],
         )
         self._vol_lookback = vol_lookback
         self._vol_mult = vol_mult

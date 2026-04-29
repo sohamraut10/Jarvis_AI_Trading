@@ -179,7 +179,7 @@ class RegimeClassifier:
         """Convenience wrapper: extract features then classify."""
         features = self.extract_features(closes, vix, pcr, oi_change_pct)
         if features is None:
-            return Regime.UNKNOWN
+            return Regime.SIDEWAYS  # not enough history yet — treat as neutral, don't block trading
         return self.predict(features)
 
     def feature_dict(self) -> dict:

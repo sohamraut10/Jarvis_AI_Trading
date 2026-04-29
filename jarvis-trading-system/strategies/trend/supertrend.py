@@ -29,7 +29,7 @@ class SuperTrend(BaseStrategy):
     ) -> None:
         super().__init__(
             strategy_id=strategy_id,
-            supported_regimes=[Regime.TRENDING_UP, Regime.TRENDING_DOWN],
+            supported_regimes=[Regime.TRENDING_UP, Regime.TRENDING_DOWN, Regime.SIDEWAYS],
         )
         self.period = period
         self.multiplier = multiplier

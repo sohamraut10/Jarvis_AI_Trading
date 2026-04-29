@@ -29,7 +29,7 @@ class ORBBreakout(BaseStrategy):
     ) -> None:
         super().__init__(
             strategy_id=strategy_id,
-            supported_regimes=[Regime.TRENDING_UP, Regime.TRENDING_DOWN, Regime.HIGH_VOL],
+            supported_regimes=[Regime.TRENDING_UP, Regime.TRENDING_DOWN, Regime.HIGH_VOL, Regime.SIDEWAYS],
         )
         self._orb_bars = orb_bars
         self._buffer_pct = buffer_pct

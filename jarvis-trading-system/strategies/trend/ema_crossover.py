@@ -26,7 +26,7 @@ class EMACrossover(BaseStrategy):
     ) -> None:
         super().__init__(
             strategy_id=strategy_id,
-            supported_regimes=[Regime.TRENDING_UP, Regime.TRENDING_DOWN],
+            supported_regimes=[Regime.TRENDING_UP, Regime.TRENDING_DOWN, Regime.SIDEWAYS],
         )
         self.fast_period = fast_period
         self.slow_period = slow_period

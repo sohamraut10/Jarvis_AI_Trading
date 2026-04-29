@@ -30,7 +30,7 @@ class RSIMomentum(BaseStrategy):
     ) -> None:
         super().__init__(
             strategy_id=strategy_id,
-            supported_regimes=[Regime.TRENDING_UP, Regime.TRENDING_DOWN],
+            supported_regimes=[Regime.TRENDING_UP, Regime.TRENDING_DOWN, Regime.SIDEWAYS],
         )
         self._rsi_period = rsi_period
         self._bull_threshold = bull_threshold
