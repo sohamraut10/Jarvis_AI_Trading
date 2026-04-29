@@ -1,47 +1,42 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # ── JARVIS AI Trading — Termux dependency installer ───────────────────────────
 # Usage:  bash scripts/install_termux.sh
-#
-# Strategy:
-#   1. pkg install  — for packages Termux ships as native ARM64 binaries
-#   2. pip install --only-binary :all:  — pre-built wheels only, no compilation
-#   3. pip install  — fallback with compilation allowed (last resort)
+# Never compiles from source — binary-only everywhere to avoid getting stuck.
 
 set -e
 cd "$(dirname "$0")/.."   # project root
 
-pkg_try() {
-    # Try installing a pkg package; silently skip if not found
-    pkg install -y "$1" 2>&1 | grep -v "^$" | grep -v "^Reading\|^Building\|^Calculating" || true
-}
-
 echo "[JARVIS] updating Termux package lists..."
 pkg update -y 2>/dev/null || true
 
-# ── 1. pkg for known-available native packages ────────────────────────────────
+# ── pkg for Termux-native compiled packages ───────────────────────────────────
 echo ""
-echo "[JARVIS] step 1: pkg install for native ARM64 packages..."
-pkg install -y python-numpy 2>/dev/null && echo "  ✓ numpy (pkg)" || echo "  - numpy (will try pip)"
-pkg install -y python-scipy 2>/dev/null && echo "  ✓ scipy (pkg)" || echo "  - scipy (will try pip)"
+echo "[JARVIS] step 1: pkg install (numpy, scipy)..."
+pkg install -y python-numpy 2>/dev/null && echo "  ✓ numpy" || echo "  ! numpy — will try pip"
+pkg install -y python-scipy 2>/dev/null && echo "  ✓ scipy" || echo "  ! scipy — will try pip"
 
-# ── 2. pip --only-binary for packages without pkg entries ─────────────────────
-echo ""
-echo "[JARVIS] step 2: pip (binary wheels only, no compilation)..."
-pip install --prefer-binary --only-binary=pandas,scikit-learn,hmmlearn \
-    "pandas>=2.2.3" \
-    "scikit-learn>=1.5.0" \
-    "hmmlearn>=0.3.2" \
-    2>/dev/null \
-    && echo "  ✓ pandas, scikit-learn, hmmlearn (pip wheels)" \
-    || {
-        echo "  - binary-only install failed, trying with compilation allowed..."
-        pip install "pandas>=2.2.3" "scikit-learn>=1.5.0" "hmmlearn>=0.3.2"
-    }
+# ── pip binary-only helper (skips instead of compiling) ──────────────────────
+pip_bin() {
+    local spec="$1"
+    local name="${spec%%[>=!<]*}"
+    echo -n "  $name ... "
+    if pip install -q --only-binary :all: "$spec" 2>/dev/null; then
+        echo "✓"
+    else
+        echo "SKIPPED (no binary wheel — server degrades gracefully)"
+    fi
+}
 
-# ── 3. Pure-Python packages (no compilation needed) ──────────────────────────
 echo ""
-echo "[JARVIS] step 3: pure-Python packages via pip..."
-pip install \
+echo "[JARVIS] step 2: compiled packages via pip (binary wheel or skip)..."
+pip_bin "pandas>=2.2.3"
+pip_bin "scikit-learn>=1.5.0"
+pip_bin "hmmlearn>=0.3.2"    # optional — rule-based fallback exists in code
+
+# ── Pure-Python packages (no compilation ever) ───────────────────────────────
+echo ""
+echo "[JARVIS] step 3: pure-Python packages..."
+pip install -q \
     "websockets==12.0" \
     "httpx==0.27.0" \
     "python-dotenv==1.0.1" \
@@ -54,7 +49,7 @@ pip install \
     "openai>=1.30.0" \
     "google-generativeai>=0.8.0" \
     "pyyaml>=6.0.1"
+echo "  ✓ all pure-Python packages"
 
 echo ""
-echo "[JARVIS] ✓ all dependencies installed"
-echo "[JARVIS]   run: bash scripts/start_termux.sh"
+echo "[JARVIS] ✓ done — run: bash scripts/start_termux.sh"
