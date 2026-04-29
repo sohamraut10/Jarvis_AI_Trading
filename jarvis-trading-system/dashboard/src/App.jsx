@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import ApprovalBanner from "./components/ApprovalBanner";
 import DrawdownBar from "./components/DrawdownBar";
 import GlobalSearch from "./components/GlobalSearch";
@@ -14,7 +14,16 @@ import ControlRoom from "./views/ControlRoom";
 import MissionControl from "./views/MissionControl";
 import StrategyArena from "./views/StrategyArena";
 import TradeLedger from "./views/TradeLedger";
-import ChartView from "./views/ChartView";
+
+const ChartView = lazy(() =>
+  import("./views/ChartView").catch(() => ({
+    default: () => (
+      <div className="p-8 text-center text-yellow-600 font-mono text-sm">
+        Chart unavailable — run: <code className="text-yellow-400">npm install</code> in the dashboard folder
+      </div>
+    ),
+  }))
+);
 
 const WS_URL =
   import.meta.env.VITE_WS_URL ??
@@ -163,7 +172,11 @@ export default function App() {
           />
         )}
         {view === "log" && <CommandLog />}
-        {view === "chart" && <ChartView snapshot={snapshot} />}
+        {view === "chart" && (
+          <Suspense fallback={<div className="p-8 text-center text-cyan-600 font-mono text-sm animate-pulse">Loading chart…</div>}>
+            <ChartView snapshot={snapshot} />
+          </Suspense>
+        )}
       </main>
 
       <NotificationStack banners={notifs.banners} onDismiss={notifs.dismiss} />
