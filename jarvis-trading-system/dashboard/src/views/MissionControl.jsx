@@ -26,10 +26,11 @@ class PanelBoundary extends Component {
 // ── Market Scanner ────────────────────────────────────────────────────────────
 
 const STATUS_CFG = {
-  live:      { dot: "bg-green-400 animate-pulse", label: "LIVE",      text: "text-green-400" },
-  stale:     { dot: "bg-yellow-500",              label: "STALE",     text: "text-yellow-500" },
-  searching: { dot: "bg-cyan-500 animate-pulse",  label: "SCANNING",  text: "text-cyan-400"  },
-  offline:   { dot: "bg-gray-700",                label: "OFFLINE",   text: "text-gray-600"  },
+  live:         { dot: "bg-green-400 animate-pulse", label: "LIVE",         text: "text-green-400" },
+  stale:        { dot: "bg-yellow-500",              label: "STALE",        text: "text-yellow-500" },
+  searching:    { dot: "bg-cyan-500 animate-pulse",  label: "SCANNING",     text: "text-cyan-400"  },
+  offline:      { dot: "bg-gray-700",                label: "OFFLINE",      text: "text-gray-600"  },
+  market_closed:{ dot: "bg-indigo-800",              label: "MKT CLOSED",   text: "text-indigo-500" },
 };
 
 function PairRow({ sym, data, flash }) {
@@ -115,10 +116,10 @@ function MarketScanner({ scanner, connected, onSearchOpen }) {
   const liveCount   = liveEntries.length;
   const totalCount  = allEntries.length;
 
-  // Render all instruments, live first then stale → searching → offline
-  const STATUS_ORDER = { live: 0, stale: 1, searching: 2, offline: 3 };
+  // Render all instruments, live first then stale → market_closed → searching → offline
+  const STATUS_ORDER = { live: 0, stale: 1, market_closed: 2, searching: 3, offline: 4 };
   const sortedEntries = [...allEntries].sort(([, a], [, b]) =>
-    (STATUS_ORDER[a.status] ?? 2) - (STATUS_ORDER[b.status] ?? 2)
+    (STATUS_ORDER[a.status] ?? 3) - (STATUS_ORDER[b.status] ?? 3)
   );
   const currency    = sortedEntries.filter(([, d]) =>  d.is_currency);
   const commodities = sortedEntries.filter(([, d]) =>  d.is_commodity && !d.is_currency);

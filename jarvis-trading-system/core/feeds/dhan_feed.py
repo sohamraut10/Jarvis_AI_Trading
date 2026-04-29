@@ -23,6 +23,9 @@ _DHAN_WSS = "wss://api-feed.dhan.co"
 _LIVE_WINDOW   = 60    # seconds — "LIVE"
 _STALE_WINDOW  = 300   # seconds — "STALE" (was live, now quiet)
 
+# If WebSocket is connected but zero ticks arrive in this window, fall back to SimulatedFeed
+_NO_TICKS_FALLBACK_SECS = 300   # 5 minutes
+
 _DISCONNECT_CODES = {
     805: "max WebSocket connections exceeded — close other sessions",
     806: "not subscribed to Dhan Data APIs — enable market data plan",
@@ -107,12 +110,24 @@ class DhanFeed:
 
     # ── Public scanner interface ───────────────────────────────────────────────
 
+    @staticmethod
+    def _currency_market_open() -> bool:
+        """NSE currency futures: Mon–Fri 09:00–17:00 IST."""
+        from datetime import timezone, timedelta, datetime as _dt
+        IST = timezone(timedelta(hours=5, minutes=30))
+        now = _dt.now(IST)
+        if now.weekday() >= 5:
+            return False
+        t = now.hour * 60 + now.minute
+        return 540 <= t <= 1020   # 09:00 → 17:00
+
     def scanner_data(self) -> dict:
         """
         Return per-symbol discovery state for the frontend scanner panel.
-        Status: "searching" | "live" | "stale" | "offline"
+        Status: "searching" | "live" | "stale" | "offline" | "market_closed"
         """
         now = time.time()
+        curr_mkt_open = self._currency_market_open()
         result = {}
         for sym in self._all_symbols:
             ticks     = self._sym_ticks.get(sym, 0)
@@ -120,8 +135,17 @@ class DhanFeed:
             ltp       = self._sym_ltp.get(sym)
             idle      = (now - last_time) if last_time else None
 
+            info     = self._instrument_info.get(sym, {})
+            seg      = info.get("segment", "")
+            is_comm  = seg == "MCX_COMM" or (not seg and sym in self._comm_symbols)
+            is_curr  = (sym.endswith("INR") or sym in self._curr_symbols) and not is_comm
+
             if last_time is None:
-                status = "searching"
+                # No tick yet — distinguish "market closed" from genuinely searching
+                if is_curr and not curr_mkt_open:
+                    status = "market_closed"
+                else:
+                    status = "searching"
             elif idle <= _LIVE_WINDOW:
                 status = "live"
             elif idle <= _STALE_WINDOW:
@@ -129,11 +153,6 @@ class DhanFeed:
             else:
                 status = "offline"
 
-            info     = self._instrument_info.get(sym, {})
-            seg      = info.get("segment", "")
-            # fall back to constructor lists when scrip master hasn't resolved yet
-            is_comm  = seg == "MCX_COMM" or (not seg and sym in self._comm_symbols)
-            is_curr  = (sym.endswith("INR") or sym in self._curr_symbols) and not is_comm
             exchange = "MCX" if is_comm else ("NSE_CURR" if is_curr else "NSE")
             result[sym] = {
                 "status":        status,
@@ -233,6 +252,27 @@ class DhanFeed:
                 asyncio.run_coroutine_threadsafe(self._fallback(tick_callback), loop)
 
         loop.run_in_executor(None, _run)
+
+        # No-ticks watchdog: if WebSocket stays connected but silent for too long,
+        # fall back to SimulatedFeed so paper trading continues outside market hours
+        async def _no_ticks_watchdog() -> None:
+            await asyncio.sleep(_NO_TICKS_FALLBACK_SECS)
+            if self.ticks_received == 0 and self._running and self._sim_fallback is None:
+                if self._currency_market_open():
+                    logger.warning(
+                        "[Dhan] %ds elapsed, market open but zero ticks — "
+                        "check Dhan subscription / token / security IDs",
+                        _NO_TICKS_FALLBACK_SECS,
+                    )
+                else:
+                    logger.info(
+                        "[Dhan] currency market closed, no ticks in %ds — "
+                        "switching to SimulatedFeed for paper trading",
+                        _NO_TICKS_FALLBACK_SECS,
+                    )
+                await self._fallback(tick_callback)
+
+        asyncio.create_task(_no_ticks_watchdog())
 
         # Status log every 60 s
         while self._running:
