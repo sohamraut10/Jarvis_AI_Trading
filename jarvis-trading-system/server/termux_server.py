@@ -830,6 +830,33 @@ async def _route(method: str, path: str, query: dict, body: dict) -> tuple[int, 
         stats = _scrip_master.stats()
         return 200, {"query": q, "segment_filter": seg, "stats": stats, "hits": hits}
 
+    if path == "/api/debug/feed":
+        if not _engine:
+            return 200, {"error": "engine not ready"}
+        feed = _engine._feed
+        # Extract live subscription info from DhanFeed (if it is one)
+        sub_list    = getattr(feed, "_sub_list",        [])
+        id_to_sym   = getattr(feed, "_id_to_sym",       {})
+        inst_info   = getattr(feed, "_instrument_info", {})
+        sym_ticks   = getattr(feed, "_sym_ticks",       {})
+        sym_ltp     = getattr(feed, "_sym_ltp",         {})
+        ticks_total = getattr(feed, "ticks_received",   0)
+        connected   = getattr(feed, "connected",        None)
+        sim_active  = getattr(feed, "_sim_fallback",    None) is not None
+        from core.feeds.dhan_instruments import CURRENCY_LOT_SIZES
+        return 200, {
+            "feed_type":     type(feed).__name__,
+            "connected":     connected,
+            "sim_fallback":  sim_active,
+            "ticks_total":   ticks_total,
+            "subscription_count": len(sub_list),
+            "subscriptions": sub_list,
+            "security_id_map": id_to_sym,
+            "instrument_info": inst_info,
+            "tick_counts":   sym_ticks,
+            "last_prices":   {s: round(p, 4) for s, p in sym_ltp.items()},
+        }
+
     if path == "/api/status":
         if _engine is None:
             return 200, {"status": "initializing"}

@@ -217,9 +217,22 @@ class DhanFeed:
             for sym, (seg, sid, lot) in instrument_map.items()
         }
 
-        logger.info("[Dhan] auto-discovery: subscribing to %d instruments — %s",
+        # Log full subscription list with security IDs so mismatches are easy to spot
+        for sym, (seg, sid, lot) in instrument_map.items():
+            logger.info("[Dhan] subscribed  %-14s  seg=%-10s  sid=%-8s  lot=%d", sym, seg, sid, lot)
+        # Warn about any currency symbols that failed to resolve
+        for curr_sym in self._curr_symbols:
+            if curr_sym not in instrument_map:
+                logger.error(
+                    "[Dhan] ✗ %s NOT in instrument_map — "
+                    "scrip master may have timed out or contract expired. "
+                    "Delete data/scrip_master.csv and restart.",
+                    curr_sym,
+                )
+        logger.info("[Dhan] total subscriptions: %d  (equity=%d  currency=%d)",
                     len(self._sub_list),
-                    ", ".join(f"{s}({seg})" for s, (seg, _, _) in instrument_map.items()))
+                    sum(1 for s in instrument_map if s not in self._curr_symbols),
+                    sum(1 for s in instrument_map if s in self._curr_symbols))
 
         await self._preflight_check()
 
@@ -253,8 +266,7 @@ class DhanFeed:
 
         loop.run_in_executor(None, _run)
 
-        # No-ticks watchdog: if WebSocket stays connected but silent for too long,
-        # fall back to SimulatedFeed so paper trading continues outside market hours
+        # No-ticks watchdog: fall back to SimulatedFeed when market is closed or silent
         async def _no_ticks_watchdog() -> None:
             await asyncio.sleep(_NO_TICKS_FALLBACK_SECS)
             if self.ticks_received == 0 and self._running and self._sim_fallback is None:
@@ -271,6 +283,26 @@ class DhanFeed:
                         _NO_TICKS_FALLBACK_SECS,
                     )
                 await self._fallback(tick_callback)
+
+            # Secondary check: equity live but all currency still "searching" during open hours
+            elif self.ticks_received > 10 and self._curr_symbols and self._currency_market_open():
+                curr_stuck = [
+                    s for s in self._curr_symbols
+                    if self._sym_ticks.get(s, 0) == 0
+                ]
+                if curr_stuck:
+                    sid_map = {sym: self._instrument_info.get(sym, {}) for sym in curr_stuck}
+                    logger.warning(
+                        "[Dhan] ⚠ currency market OPEN but %s never received a tick\n"
+                        "  subscribed as: %s\n"
+                        "  possible causes:\n"
+                        "  1. Dhan account missing NSE Currency market data plan\n"
+                        "     → Dhan app → Profile → Dhan API → Market Data → enable NSE Currency\n"
+                        "  2. Wrong security IDs → visit http://localhost:8766/api/debug/feed\n"
+                        "  3. Contracts just expired → delete data/scrip_master.csv and restart",
+                        ", ".join(curr_stuck),
+                        {s: f"{v.get('segment')}/{v.get('security_id')}" for s, v in sid_map.items()},
+                    )
 
         asyncio.create_task(_no_ticks_watchdog())
 
