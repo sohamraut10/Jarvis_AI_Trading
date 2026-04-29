@@ -22,7 +22,9 @@ function SignalRow({ sig }) {
       <span className="text-gray-500 shrink-0 truncate flex-1">{sig.strategy}</span>
       {sig.price != null && (
         <span className="text-gray-400 shrink-0">
-          ₹{Number(sig.price).toFixed(2)}
+          {Number(sig.price) < 100
+            ? Number(sig.price).toFixed(5)
+            : `₹${Number(sig.price).toFixed(2)}`}
         </span>
       )}
     </div>

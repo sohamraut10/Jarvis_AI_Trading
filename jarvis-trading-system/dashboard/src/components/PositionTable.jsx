@@ -4,7 +4,9 @@ const COL = "px-3 py-2 tabular-nums text-xs";
 const HEADER = "px-3 py-1.5 text-[10px] text-gray-600 tracking-widest uppercase text-right";
 
 export default function PositionTable({ snapshot }) {
-  const positions = Object.values(snapshot?.positions ?? {});
+  const openPositions = snapshot?.broker?.open_positions ?? {};
+  const ltpMap        = snapshot?.ltp ?? {};
+  const positions     = Object.entries(openPositions);
 
   return (
     <div className="bg-gray-900 border border-gray-800 rounded p-4">
@@ -28,32 +30,35 @@ export default function PositionTable({ snapshot }) {
               </tr>
             </thead>
             <tbody>
-              {positions.map((pos) => {
-                const unrealised = (pos.ltp - pos.avg_price) * pos.quantity;
-                const sideColour =
-                  pos.quantity > 0 ? "text-green-400" : "text-red-400";
+              {positions.map(([symbol, pos]) => {
+                const ltp        = ltpMap[symbol] ?? pos.avg_price;
+                const sideColour = pos.qty > 0 ? "text-green-400" : "text-red-400";
+                const isForex    = !symbol.endsWith("INR") && symbol.length === 6;
+                const fmt        = (v) => isForex
+                  ? Number(v).toFixed(5)
+                  : formatCurrency(v);
                 return (
                   <tr
-                    key={pos.symbol}
+                    key={symbol}
                     className="border-b border-gray-800/50 hover:bg-gray-800/30"
                   >
                     <td className={`${COL} text-left font-mono font-bold ${sideColour}`}>
-                      {pos.symbol}
+                      {symbol}
                     </td>
                     <td className={`${COL} text-right text-gray-300`}>
-                      {pos.quantity}
+                      {pos.qty}
                     </td>
                     <td className={`${COL} text-right text-gray-400`}>
-                      {formatCurrency(pos.avg_price)}
+                      {fmt(pos.avg_price)}
                     </td>
                     <td className={`${COL} text-right text-gray-200`}>
-                      {formatCurrency(pos.ltp)}
+                      {fmt(ltp)}
                     </td>
-                    <td className={`${COL} text-right font-bold ${pnlClass(unrealised)}`}>
-                      {formatCurrency(unrealised, true)}
+                    <td className={`${COL} text-right font-bold ${pnlClass(pos.unrealized_pnl)}`}>
+                      {formatCurrency(pos.unrealized_pnl, true)}
                     </td>
-                    <td className={`${COL} text-right ${pnlClass(pos.realised_pnl)}`}>
-                      {formatCurrency(pos.realised_pnl, true)}
+                    <td className={`${COL} text-right ${pnlClass(pos.realized_pnl)}`}>
+                      {formatCurrency(pos.realized_pnl, true)}
                     </td>
                   </tr>
                 );
