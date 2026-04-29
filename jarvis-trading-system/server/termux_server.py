@@ -86,11 +86,9 @@ AI_BRAIN_WARMUP_S      = 90     # wait before first brain cycle (bars need to ac
 AI_BRAIN_INTERVAL_S    = 300    # re-run full pipeline every 5 min
 AI_BRAIN_MAX_PER_CYCLE = 3      # max LLM calls per pipeline cycle (cost guard)
 
-WATCH_SYMBOLS: list[str] = []   # no equities — currency auto-discovery mode
-# All 4 NSE currency pairs — feed detects which are actually live
-CURRENCY_SYMBOLS: list[str] = ["USDINR", "EURINR", "GBPINR", "JPYINR"]
-# Popular MCX commodities — near-month futures resolved via scrip master
-MCX_SYMBOLS: list[str] = ["CRUDEOIL", "GOLD", "SILVER", "NATURALGAS", "COPPER"]
+WATCH_SYMBOLS: list[str] = []   # populated by auto-discovery (NSE equities)
+CURRENCY_SYMBOLS: list[str] = []   # disabled — focus on NSE equities
+MCX_SYMBOLS: list[str] = []        # disabled — focus on NSE equities
 BASE_PRICES: dict[str, float] = {
     "RELIANCE": 2500.0, "TCS": 3800.0, "INFY": 1500.0,
     "HDFCBANK": 1700.0, "SBIN": 800.0,
