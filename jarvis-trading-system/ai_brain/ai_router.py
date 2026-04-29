@@ -666,7 +666,13 @@ class AIRouter:
 
     def _get_gemini_client(self):
         if self._gemini_client is None:
-            import google.generativeai as genai  # noqa: PLC0415
+            try:
+                import google.generativeai as genai  # noqa: PLC0415
+            except ImportError:
+                raise EnvironmentError(
+                    "google-generativeai not installed (skipped on Termux). "
+                    "Use Anthropic or OpenAI provider instead."
+                )
             api_key = os.environ.get("GOOGLE_API_KEY", "")
             if not api_key:
                 raise EnvironmentError("GOOGLE_API_KEY not set. Export it or add to .env.")
