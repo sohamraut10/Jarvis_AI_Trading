@@ -1,4 +1,4 @@
-import { Component, useEffect, useRef, useState } from "react";
+import React, { Component, useEffect, useRef, useState } from "react";
 import IntelligencePanel from "../components/IntelligencePanel";
 import PnLPanel from "../components/PnLPanel";
 import PositionTable from "../components/PositionTable";
@@ -252,6 +252,130 @@ function HealthTile({ snapshot, connected }) {
   );
 }
 
+// ── Opportunities Panel ───────────────────────────────────────────────────────
+
+const DIR_CFG = {
+  BUY:  { cls: "text-green-400 border-green-800 bg-green-950/30",  label: "BUY"  },
+  SELL: { cls: "text-red-400   border-red-800   bg-red-950/30",    label: "SELL" },
+  FLAT: { cls: "text-gray-500  border-gray-700  bg-gray-800/30",   label: "FLAT" },
+};
+
+const ASSET_CFG = {
+  Equity:   "text-blue-400",
+  ETF:      "text-purple-400",
+  MCX:      "text-orange-400",
+  Currency: "text-cyan-400",
+};
+
+function OpportunityRow({ item, onSubscribe }) {
+  const dir = DIR_CFG[item.direction] ?? DIR_CFG.FLAT;
+  const assetCls = ASSET_CFG[item.asset_class] ?? "text-gray-400";
+  return (
+    <div className="flex items-center gap-2 py-1.5 border-b border-gray-800/40 last:border-0">
+      <span className="text-[9px] text-gray-700 w-4 text-right tabular-nums shrink-0">{item.rank}</span>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs font-mono font-bold text-gray-200 truncate">{item.symbol}</span>
+          <span className={`text-[8px] font-bold shrink-0 ${assetCls}`}>{item.asset_class}</span>
+        </div>
+        <div className="text-[9px] text-gray-600 mt-0.5 truncate">{item.reasoning}</div>
+      </div>
+      <div className="shrink-0 text-right">
+        <div className={`text-[9px] font-mono tabular-nums ${item.change_pct >= 0 ? "text-green-400" : "text-red-400"}`}>
+          {item.change_pct >= 0 ? "+" : ""}{item.change_pct?.toFixed(2)}%
+        </div>
+        <div className="text-[9px] text-gray-600 font-mono">score {item.score?.toFixed(0)}</div>
+      </div>
+      <span className={`shrink-0 text-[8px] font-bold px-1.5 py-0.5 rounded border tracking-widest ${dir.cls}`}>
+        {dir.label}
+      </span>
+      <button
+        onClick={() => onSubscribe(item)}
+        title="Subscribe to feed"
+        className="shrink-0 w-5 h-5 flex items-center justify-center rounded border border-gray-800
+                   text-gray-600 hover:text-cyan-400 hover:border-cyan-800 transition-colors text-xs"
+      >+</button>
+    </div>
+  );
+}
+
+function OpportunitiesPanel({ snapshot }) {
+  const disc        = snapshot?.discovery ?? {};
+  const results     = disc.results ?? [];
+  const marketOpen  = disc.market_open;
+  const scanAgo     = disc.last_scan_ago ?? null;
+  const error       = disc.error;
+  const [scanning, setScanning] = React.useState(false);
+
+  const scanNow = async () => {
+    setScanning(true);
+    await fetch("/api/market/discover", { method: "POST" }).catch(() => {});
+    setScanning(false);
+  };
+
+  const subscribe = async (item) => {
+    await fetch("/api/instruments/subscribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        symbol: item.symbol,
+        exchange_segment: item.segment,
+        security_id: item.security_id ?? "",
+        lot_size: 1,
+      }),
+    }).catch(() => {});
+  };
+
+  const scanAgoStr = scanAgo == null ? "—"
+    : scanAgo < 60   ? `${scanAgo}s ago`
+    : `${(scanAgo / 60).toFixed(0)}m ago`;
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded p-4">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] text-gray-500 tracking-widest uppercase">Opportunities</span>
+          {marketOpen === true  && <span className="text-[8px] text-green-400 border border-green-900 bg-green-950/20 px-1.5 py-0.5 rounded font-bold">MARKET OPEN</span>}
+          {marketOpen === false && <span className="text-[8px] text-gray-600 border border-gray-800 px-1.5 py-0.5 rounded font-bold">MARKET CLOSED</span>}
+        </div>
+        <div className="flex items-center gap-2">
+          {scanAgo != null && <span className="text-[9px] text-gray-700 font-mono">{scanAgoStr}</span>}
+          <button
+            onClick={scanNow}
+            disabled={scanning}
+            className="text-[9px] px-2 py-0.5 rounded border border-cyan-900 text-cyan-700
+                       hover:text-cyan-400 hover:border-cyan-700 transition-colors disabled:opacity-40"
+          >{scanning ? "scanning…" : "scan now"}</button>
+        </div>
+      </div>
+
+      {error && (
+        <div className="text-[9px] text-yellow-700 bg-yellow-950/20 border border-yellow-900/40 rounded px-2 py-1 mb-2">
+          {error}
+        </div>
+      )}
+
+      {results.length === 0 ? (
+        <div className="text-xs text-gray-600 text-center py-4 animate-pulse">
+          {scanning ? "Scanning Indian markets…" : "Waiting for first scan…"}
+        </div>
+      ) : (
+        <div>
+          <div className="grid grid-cols-[auto_1fr_auto_auto_auto] gap-2 text-[8px] text-gray-700 uppercase tracking-widest pb-1 border-b border-gray-800 mb-1">
+            <span>#</span><span>Symbol</span><span>Chg</span><span>Dir</span><span></span>
+          </div>
+          {results.map((item) => (
+            <OpportunityRow key={item.symbol} item={item} onSubscribe={subscribe} />
+          ))}
+          <div className="text-[9px] text-gray-700 mt-2">
+            NSE live data · Nifty 50 + BankNifty + Midcap · scored by momentum, range, trend
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Main view ─────────────────────────────────────────────────────────────────
 
 export default function MissionControl({ snapshot, pnlHistory, signals, connected, onSearchOpen }) {
@@ -259,6 +383,9 @@ export default function MissionControl({ snapshot, pnlHistory, signals, connecte
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 p-4">
       {/* left 2/3 */}
       <div className="lg:col-span-2 flex flex-col gap-4">
+        <PanelBoundary label="Opportunities">
+          <OpportunitiesPanel snapshot={snapshot} />
+        </PanelBoundary>
         <PanelBoundary label="PnL Chart">
           <PnLPanel
             pnlHistory={pnlHistory.length ? pnlHistory : [{ t: "—", pnl: 0 }]}

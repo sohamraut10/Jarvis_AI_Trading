@@ -181,6 +181,28 @@ class SimulatedFeed:
     def current_price(self, symbol: str) -> Optional[float]:
         return self._prices.get(symbol)
 
+    def add_instrument(
+        self,
+        exchange_segment: str,
+        security_id: str,
+        symbol: str,
+        lot_size: int = 1,
+        initial_price: Optional[float] = None,
+    ) -> bool:
+        """Dynamically add a symbol to the simulation."""
+        if symbol not in self._symbols:
+            self._symbols.append(symbol)
+            price = initial_price or BASE_PRICES.get(symbol, 100.0)
+            self._prices[symbol] = price
+            logger.info("[SimFeed] added %s  start_price=%.4f", symbol, price)
+        return True
+
+    def remove_symbol(self, symbol: str) -> None:
+        if symbol in self._symbols:
+            self._symbols.remove(symbol)
+            self._prices.pop(symbol, None)
+            logger.info("[SimFeed] removed %s", symbol)
+
 # ── JARVIS Engine ──────────────────────────────────────────────────────────────
 
 class JarvisEngine:
@@ -237,6 +259,11 @@ class JarvisEngine:
         self._action_executor  = ActionExecutor(self._trade_monitor)
         self._ai_decisions: deque[dict] = deque(maxlen=50)
         self._ai_brain_enabled = True
+        # ── Auto-discovery (market-wide NSE scanner) ──────────────────────────
+        from intelligence.auto_discoverer import AutoDiscoverer
+        self._discoverer              = AutoDiscoverer()
+        self._discovery_results: list = []
+        self._discovery_market_open: Optional[bool] = None
 
     async def start(self) -> None:
         await self._pnl_tracker.init()
@@ -257,6 +284,7 @@ class JarvisEngine:
         self._tasks.append(asyncio.create_task(self._heartbeat_loop()))
         self._tasks.append(asyncio.create_task(self._intelligence_loop()))
         self._tasks.append(asyncio.create_task(self._ai_brain_loop()))
+        self._tasks.append(asyncio.create_task(self._auto_discovery_loop()))
 
     async def stop(self) -> None:
         self._running = False
@@ -299,6 +327,86 @@ class JarvisEngine:
             except Exception as exc:
                 logger.warning("intelligence loop error: %s", exc)
             await asyncio.sleep(300)  # re-score every 5 min
+
+    # ── Auto-discovery (market-wide NSE scan) ─────────────────────────────────
+
+    async def _auto_discovery_loop(self) -> None:
+        """Every 5 min: scan NSE universe, rank top 10, subscribe them to the feed."""
+        await asyncio.sleep(30)   # brief startup grace period
+        while self._running:
+            try:
+                results = await self._discoverer.scan()
+                self._discovery_results      = [self._disc_to_dict(r) for r in results]
+                self._discovery_market_open  = self._discoverer.market_open()
+                if results:
+                    await self._subscribe_discoveries(results)
+            except Exception as exc:
+                logger.warning("auto-discovery loop error: %s", exc)
+            await asyncio.sleep(300)
+
+    async def _subscribe_discoveries(self, discoveries) -> None:
+        """Subscribe top discovered instruments to the live feed if not already tracked."""
+        from core.feeds.dhan_instruments import get_scrip_master
+        sm = get_scrip_master()
+
+        for disc in discoveries:
+            sym = disc.symbol
+            # Skip if already receiving ticks
+            if hasattr(self._feed, "scanner_data"):
+                sd = self._feed.scanner_data()
+                if sym in sd and sd[sym].get("status") in ("live", "stale", "searching"):
+                    continue
+            elif sym in getattr(self._feed, "_symbols", []):
+                continue
+
+            # Look up Dhan security ID via scrip master
+            seg = disc.segment
+            sid = ""
+            lot = 1
+            if sm.is_loaded():
+                hits = sm.search(sym, limit=5)
+                for h in hits:
+                    if h.get("symbol") == sym and h.get("segment") == seg:
+                        sid = str(h.get("security_id", ""))
+                        lot = int(h.get("lot_size") or 1)
+                        break
+                if not sid and hits:
+                    # Accept first NSE_EQ match by symbol prefix
+                    for h in hits:
+                        if h.get("symbol", "").startswith(sym) and "EQ" in h.get("segment", ""):
+                            sid = str(h.get("security_id", ""))
+                            lot = int(h.get("lot_size") or 1)
+                            break
+
+            if not sid:
+                logger.debug("[AutoDisc] no security_id for %s — skipping subscription", sym)
+                continue
+
+            if hasattr(self._feed, "add_instrument"):
+                ok = await self._feed.add_instrument(seg, sid, sym, lot) \
+                    if asyncio.iscoroutinefunction(self._feed.add_instrument) \
+                    else self._feed.add_instrument(seg, sid, sym, lot,
+                                                    initial_price=disc.ltp)
+                if ok:
+                    logger.info("[AutoDisc] subscribed %s (%s/%s) ltp=%.2f", sym, seg, sid, disc.ltp)
+
+    @staticmethod
+    def _disc_to_dict(d) -> dict:
+        return {
+            "symbol":        d.symbol,
+            "ltp":           d.ltp,
+            "segment":       d.segment,
+            "asset_class":   d.asset_class,
+            "score":         d.score,
+            "rank":          d.rank,
+            "direction":     d.direction,
+            "change_pct":    d.change_pct,
+            "day_range_pct": d.day_range_pct,
+            "week52_high":   d.week52_high,
+            "week52_low":    d.week52_low,
+            "trend_30d":     d.trend_30d,
+            "reasoning":     d.reasoning,
+        }
 
     def _run_pair_selection(self) -> None:
         scanner = {}
@@ -612,6 +720,12 @@ class JarvisEngine:
                 "decisions":           list(self._ai_decisions)[:10],
                 "monitored_positions": self._trade_monitor.snapshot(),
             },
+            "discovery": {
+                "results":      self._discovery_results,
+                "market_open":  self._discovery_market_open,
+                "last_scan_ago": round(self._discoverer.seconds_since_scan(), 0),
+                "error":        self._discoverer.last_error(),
+            },
         }
 
     async def manual_kill(self) -> None:
@@ -886,6 +1000,22 @@ async def _route(method: str, path: str, query: dict, body: dict) -> tuple[int, 
             _engine._selected_symbols = set(symbols)
             logger.info("Intelligence manual override: %s", symbols)
         return 200, {"status": "overridden", "selected_symbols": symbols}
+
+    if path == "/api/market/discover":
+        if not _engine:
+            return 200, {"results": [], "market_open": None, "error": "engine not ready"}
+        if method == "POST":
+            # Force an immediate scan
+            import asyncio as _asyncio
+            results = await _engine._discoverer.scan()
+            _engine._discovery_results     = [_engine._disc_to_dict(r) for r in results]
+            _engine._discovery_market_open = _engine._discoverer.market_open()
+        return 200, {
+            "results":      _engine._discovery_results,
+            "market_open":  _engine._discovery_market_open,
+            "last_scan_ago": round(_engine._discoverer.seconds_since_scan(), 0),
+            "error":        _engine._discoverer.last_error(),
+        }
 
     if path == "/api/ai/brain":
         if not _engine:
