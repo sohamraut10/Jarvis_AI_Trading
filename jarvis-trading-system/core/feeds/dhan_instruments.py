@@ -355,16 +355,33 @@ def build_instrument_map(
                 logger.warning("[Instruments] %s not found in scrip master", sym)
 
         for pair in currency_symbols:
+            # Try NSE_CURR segment first, then broaden search if nothing found
             hits = _scrip_master.search(pair, segments=["NSE_CURR"], limit=20)
             futures = [h for h in hits if h["instrument_type"] == "FUTCUR" and h["expiry"]]
+
+            if not futures:
+                # Broader fallback: search all segments for anything currency-like
+                all_hits = _scrip_master.search(pair, limit=30)
+                logger.info("[Instruments] %s — NSE_CURR gave 0, broad search found %d: %s",
+                            pair, len(all_hits),
+                            [(h["segment"], h["instrument_type"], h["symbol"]) for h in all_hits[:5]])
+                # Accept any segment that looks like currency futures
+                futures = [
+                    h for h in all_hits
+                    if h["expiry"] and (
+                        h["instrument_type"] in ("FUTCUR", "FUTIDX", "FUTSTK") or
+                        "CUR" in h["segment"].upper()
+                    )
+                ]
+
             futures.sort(key=lambda h: h["expiry"])
             if futures:
                 f = futures[0]
                 result[pair] = (f["segment"], f["security_id"], f["lot_size"])
-                logger.info("[Instruments] %s → sid=%s  expiry=%s  lot=%d",
-                            pair, f["security_id"], f["expiry"], f["lot_size"])
+                logger.info("[Instruments] %s → seg=%s  sid=%s  expiry=%s  lot=%d",
+                            pair, f["segment"], f["security_id"], f["expiry"], f["lot_size"])
             else:
-                logger.warning("[Instruments] no near-month contract for %s", pair)
+                logger.warning("[Instruments] no contract found for %s — skipping", pair)
 
         for sym in commodity_symbols:
             hits = _scrip_master.search(sym, segments=["MCX_COMM"], limit=20)

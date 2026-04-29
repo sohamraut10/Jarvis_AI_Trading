@@ -793,6 +793,15 @@ def _mask(val: str, keep: int = 4) -> str:
     return val[:keep] + "•" * max(0, len(val) - keep)
 
 async def _route(method: str, path: str, query: dict, body: dict) -> tuple[int, object]:
+    if path == "/api/debug/scrip":
+        from core.feeds.dhan_instruments import _scrip_master, search_instruments
+        q   = query.get("q", ["USDINR"])[0]
+        seg = query.get("seg", [None])[0]
+        segs = [seg] if seg else None
+        hits = search_instruments(q, segments=segs, limit=20)
+        stats = _scrip_master.stats()
+        return 200, {"query": q, "segment_filter": seg, "stats": stats, "hits": hits}
+
     if path == "/api/status":
         if _engine is None:
             return 200, {"status": "initializing"}
