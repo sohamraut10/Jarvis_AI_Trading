@@ -375,12 +375,26 @@ class DhanFeed:
                     label = "connected" if self._reconnects == 1 else f"reconnected #{self._reconnects}"
                     logger.info("[Dhan] %s — discovering live pairs…", label)
 
+                    # Read any greeting/banner from the server.
+                    # Critically: if the server immediately sends a type-50 disconnect
+                    # packet (auth failure), parse and log it before trying to subscribe.
                     try:
-                        greeting = await asyncio.wait_for(ws.recv(), timeout=1.0)
-                        logger.info("[Dhan] server greeting: %r",
-                                    greeting[:80] if isinstance(greeting, bytes) else greeting[:200])
+                        greeting = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                        if isinstance(greeting, bytes) and len(greeting) >= 1:
+                            if greeting[0] == 50:
+                                # Server sent a disconnect packet as greeting — decode and abort
+                                tick = _parse_tick(greeting)   # logs the error inside
+                                logger.error(
+                                    "[Dhan] server rejected connection immediately "
+                                    "(type-50 packet) — aborting this attempt"
+                                )
+                                break   # exit the while-running loop → triggers fast-fail path
+                            else:
+                                logger.info("[Dhan] server greeting: %r", greeting[:80])
+                        elif isinstance(greeting, str):
+                            logger.info("[Dhan] server greeting: %s", greeting[:200])
                     except asyncio.TimeoutError:
-                        pass
+                        pass   # no greeting — proceed normally
 
                     # Build sub msg from current instance vars (includes dynamically added)
                     sub_msg = json.dumps({
@@ -551,6 +565,7 @@ class DhanFeed:
                     "Content-Type":   "application/json",
                 },
                 timeout=10,
+                allow_redirects=False,   # a redirect means token expired → login page
             )
             try:
                 body = resp.json()
@@ -573,6 +588,11 @@ class DhanFeed:
                 logger.error("[Dhan] │  → access_token is EXPIRED or INVALID")
                 logger.error("[Dhan] │  → open Dhan app  →  My Profile  →  Dhan API  →  Generate Token")
                 logger.error("[Dhan] └─ will fall back to SimulatedFeed after WS fails")
+            elif status in (301, 302, 303, 307, 308):
+                logger.error("[Dhan] │  REST check     : ✗ REDIRECT (HTTP %d) — token EXPIRED", status)
+                logger.error("[Dhan] │  → Dhan is redirecting to login — access_token is invalid")
+                logger.error("[Dhan] │  → open Dhan app → My Profile → Dhan API → Generate Token")
+                logger.error("[Dhan] └─ WebSocket will also fail — fix token first")
             elif status == 429:
                 logger.warning("[Dhan] │  REST check     : rate-limited (HTTP 429) — skipping balance check")
                 logger.info("[Dhan] └─ token may still be valid; proceeding")
@@ -580,8 +600,14 @@ class DhanFeed:
                 logger.warning("[Dhan] │  REST check     : HTTP %d — %s", status, str(body)[:120])
                 logger.info("[Dhan] └─ proceeding (non-fatal)")
         except Exception as exc:
-            logger.warning("[Dhan] │  REST check     : skipped (%s)", exc)
-            logger.info("[Dhan] └─ network unavailable — proceeding anyway")
+            err_str = str(exc)
+            if "redirect" in err_str.lower():
+                logger.error("[Dhan] │  REST check     : ✗ redirect loop — token likely EXPIRED")
+                logger.error("[Dhan] │  → open Dhan app → My Profile → Dhan API → Generate Token")
+                logger.error("[Dhan] └─ WebSocket will also fail — fix token first")
+            else:
+                logger.warning("[Dhan] │  REST check     : skipped (%s)", exc)
+                logger.info("[Dhan] └─ network unavailable — proceeding anyway")
 
     async def _fallback(self, tick_callback: Callable) -> None:
         logger.info("[Dhan] switching to SimulatedFeed")
