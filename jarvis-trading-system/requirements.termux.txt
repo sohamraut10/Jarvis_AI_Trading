@@ -1,7 +1,13 @@
 # ── Termux / Android lightweight requirements ─────────────────────────────────
 # Omits torch, stable-baselines3, gymnasium, optuna (~2 GB on desktop).
 # The RL agent and Bayesian optimizer degrade gracefully when these are absent.
-# Install with: pip install -r requirements.termux.txt
+#
+# Install with:
+#   pip install -r requirements.termux.txt
+#
+# NOTE: numpy/pandas/scipy/scikit-learn are pinned to versions that ship
+# pre-built ARM64 wheels for Python 3.13. Do NOT downgrade — older pins
+# (1.26.x, 1.13.x) have no 3.13 wheels and will try to compile from source.
 
 # ── Core API & async ──────────────────────────────────────────────────────────
 websockets==12.0
@@ -12,12 +18,12 @@ pydantic==2.7.1
 # ── Dhan broker SDK ───────────────────────────────────────────────────────────
 dhanhq==2.0.1
 
-# ── Numerical / ML (ARM64 wheels available via pip) ───────────────────────────
-numpy==1.26.4
-pandas==2.2.2
-scipy==1.13.0
-scikit-learn==1.4.2
-hmmlearn==0.3.2
+# ── Numerical / ML (Python 3.13 + ARM64 compatible) ──────────────────────────
+numpy>=2.1.0
+pandas>=2.2.3
+scipy>=1.14.0
+scikit-learn>=1.5.0
+hmmlearn>=0.3.2
 
 # ── Async / scheduling ────────────────────────────────────────────────────────
 aiofiles==23.2.1
