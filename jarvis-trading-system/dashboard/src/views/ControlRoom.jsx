@@ -114,6 +114,7 @@ const DEFAULT_S = {
   hmm_states: 4, regime_lookback_bars: 200, sharpe_rank_window_days: 20,
   ws_port: 8765, log_level: "INFO",
   intent_log_path: "logs/intent.jsonl", pnl_db_path: "data/pnl.db",
+  anthropic_api_key: "", openai_api_key: "", google_api_key: "", gemini_free_tier: false,
 };
 
 // ── Kill Switch panel ─────────────────────────────────────────────────────────
@@ -313,6 +314,89 @@ function StrategyPanel() {
   );
 }
 
+// ── AI Brain panel ────────────────────────────────────────────────────────────
+
+function AiBrainPanel({ snapshot }) {
+  const brain   = snapshot?.ai_brain ?? {};
+  const enabled = brain.enabled ?? false;
+  const [loading, setLoading] = useState(false);
+
+  const toggle = async () => {
+    setLoading(true);
+    await fetch("/api/ai/brain/toggle", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: !enabled }),
+    }).catch(() => {});
+    setLoading(false);
+  };
+
+  const budgetPct = brain.budget_pct_used != null
+    ? `${(brain.budget_pct_used * 100).toFixed(1)}%` : "—";
+  const costInr = brain.daily_cost_inr != null
+    ? `₹${brain.daily_cost_inr.toFixed(2)}` : "—";
+
+  return (
+    <div className="space-y-3">
+      <Toggle
+        label="AI Brain enabled"
+        note="Runs every 5 min: scan → shortlist → analyse → decide → monitor"
+        checked={enabled}
+        onChange={toggle}
+        disabled={loading}
+      />
+      <div className="flex gap-5 text-[10px] text-gray-600 border-t border-gray-800 pt-3">
+        <div>Daily cost: <span className="text-gray-400 font-mono">{costInr}</span></div>
+        <div>
+          Budget used:{" "}
+          <span className={`font-mono ${
+            (brain.budget_pct_used ?? 0) > 0.8 ? "text-red-400" :
+            (brain.budget_pct_used ?? 0) > 0.5 ? "text-yellow-400" : "text-gray-400"
+          }`}>{budgetPct}</span>
+        </div>
+        <div>Mode: <span className="text-gray-400 font-mono">{brain.mode ?? "—"}</span></div>
+      </div>
+    </div>
+  );
+}
+
+// ── Intelligence auto-select panel ────────────────────────────────────────────
+
+function IntelligenceAutoPanel({ snapshot }) {
+  const autoSelect = snapshot?.intelligence?.auto_select ?? false;
+  const [loading, setLoading]   = useState(false);
+
+  const toggle = async () => {
+    setLoading(true);
+    await fetch("/api/intelligence/toggle_auto", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ auto_select: !autoSelect }),
+    }).catch(() => {});
+    setLoading(false);
+  };
+
+  const selected = snapshot?.intelligence?.selected_symbols ?? [];
+
+  return (
+    <div className="space-y-3">
+      <Toggle
+        label="Auto-select symbols"
+        note="JARVIS scores all subscribed instruments and trades the top-ranked pair automatically."
+        checked={autoSelect}
+        onChange={toggle}
+        disabled={loading}
+      />
+      {selected.length > 0 && (
+        <div className="text-[9px] text-gray-600 border-t border-gray-800 pt-2">
+          Currently selected:{" "}
+          <span className="text-gray-400 font-mono">{selected.join(", ")}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Positions panel ───────────────────────────────────────────────────────────
 
 function PositionsPanel({ snapshot }) {
@@ -486,9 +570,19 @@ export default function ControlRoom({
         <ActiveWatchlist snapshot={snapshot} onSearchOpen={onSearchOpen} />
       </Section>
 
+      {/* ── Intelligence Auto-select ─────────────────────────────── */}
+      <Section title="Intelligence Auto-select" badge={IMMEDIATE}>
+        <IntelligenceAutoPanel snapshot={snapshot} />
+      </Section>
+
       {/* ── Strategies ───────────────────────────────────────────── */}
       <Section title="Strategies" badge={IMMEDIATE}>
         <StrategyPanel />
+      </Section>
+
+      {/* ── AI Brain ─────────────────────────────────────────────── */}
+      <Section title="AI Brain" badge={IMMEDIATE}>
+        <AiBrainPanel snapshot={snapshot} />
       </Section>
 
       {/* ── Broker credentials ───────────────────────────────────── */}
@@ -503,6 +597,26 @@ export default function ControlRoom({
           placeholder="Enter access token…" />
         <p className="text-[9px] text-gray-700">
           Stored in <code className="text-gray-500">data/settings.json</code> — excluded from git.
+        </p>
+      </Section>
+
+      {/* ── LLM API Keys ─────────────────────────────────────────── */}
+      <Section title="LLM API Keys" badge={RESTART}>
+        <TextField label="Anthropic API key" value={s.anthropic_api_key}
+          onChange={update("anthropic_api_key")} type="password"
+          placeholder="sk-ant-…" />
+        <TextField label="OpenAI API key" value={s.openai_api_key}
+          onChange={update("openai_api_key")} type="password"
+          placeholder="sk-…" />
+        <TextField label="Google AI API key" value={s.google_api_key}
+          onChange={update("google_api_key")} type="password"
+          placeholder="AIza…" />
+        <Toggle label="Gemini free tier"
+          note="Use Gemini free-tier rate limits instead of paid quota."
+          checked={s.gemini_free_tier} onChange={update("gemini_free_tier")} />
+        <p className="text-[9px] text-gray-700">
+          Keys are stored masked in <code className="text-gray-500">data/settings.json</code> and
+          injected into env vars on startup — never logged.
         </p>
       </Section>
 

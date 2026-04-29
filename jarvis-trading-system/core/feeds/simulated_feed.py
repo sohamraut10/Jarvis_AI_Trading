@@ -60,3 +60,24 @@ class SimulatedFeed:
 
     def current_price(self, symbol: str) -> Optional[float]:
         return self._prices.get(symbol)
+
+    def add_instrument(
+        self,
+        exchange_segment: str = "",
+        security_id: str = "",
+        symbol: str = "",
+        lot_size: int = 1,
+        initial_price: Optional[float] = None,
+    ) -> bool:
+        """Dynamically add a symbol; it will be included in the next tick loop iteration."""
+        if symbol and symbol not in self._symbols:
+            price = initial_price or self._BASE_PRICES.get(symbol, 100.0)
+            self._prices[symbol] = price
+            self._symbols.append(symbol)   # list is iterated live — takes effect next loop
+            logger.info("SimulatedFeed added %-12s  start_price=%.4f", symbol, price)
+        return True
+
+    def remove_symbol(self, symbol: str) -> None:
+        if symbol in self._symbols:
+            self._symbols.remove(symbol)
+            self._prices.pop(symbol, None)

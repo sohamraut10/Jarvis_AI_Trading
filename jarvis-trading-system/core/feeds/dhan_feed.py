@@ -101,8 +101,9 @@ class DhanFeed:
         self._sub_list:        list[dict]        = []   # [{ExchangeSegment, SecurityId}, ...]
         self._instrument_lot:  dict[str, int]    = {}   # symbol → lot_size
         self._instrument_info: dict[str, dict]   = {}   # symbol → {segment, security_id, lot_size}
-        self._thread_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._thread_loop:   Optional[asyncio.AbstractEventLoop] = None
         self._current_ws  = None
+        self._sim_fallback = None   # set when _fallback() is active
 
     # ── Public scanner interface ───────────────────────────────────────────────
 
@@ -367,6 +368,7 @@ class DhanFeed:
         security_id: str,
         symbol: str,
         lot_size: int = 1,
+        initial_price: Optional[float] = None,
     ) -> bool:
         """Subscribe to a new instrument on the live WS connection (or queue for next connect)."""
         sid = str(security_id)
@@ -385,6 +387,14 @@ class DhanFeed:
         if symbol not in self._all_symbols:
             self._all_symbols.append(symbol)
             self._sym_ticks[symbol] = 0
+
+        # If we're in SimulatedFeed fallback, forward so ticks start immediately
+        if self._sim_fallback is not None:
+            self._sim_fallback.add_instrument(
+                exchange_segment, sid, symbol, lot_size, initial_price
+            )
+            logger.info("[Dhan/sim] forwarded %s to SimulatedFeed  price=%.4f",
+                        symbol, initial_price or 0)
 
         if self._current_ws is not None and self._thread_loop is not None:
             sub_msg = json.dumps({
@@ -488,7 +498,8 @@ class DhanFeed:
             self._sym_last_tick[sym] = now
             await tick_callback(sym, ltp, vol)
 
-        sim = SimulatedFeed(self._all_symbols)
+        sim = SimulatedFeed(list(self._all_symbols))
+        self._sim_fallback = sim   # expose so add_instrument() can forward to it
         await sim.start(_tick_and_track)
 
     def stop(self) -> None:
