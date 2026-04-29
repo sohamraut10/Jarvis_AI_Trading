@@ -35,21 +35,16 @@ _DISCONNECT_CODES = {
 }
 
 
+# Track how many times each unknown packet type is seen (to limit log spam)
+_unknown_packet_types: dict[int, int] = {}
+
+
 def _parse_tick(data: bytes) -> Optional[dict]:
     if not data or len(data) < 1:
         return None
     first_byte = data[0]
     try:
-        if first_byte == 2:
-            _, _, exch, sec_id, ltp, _ = struct.unpack('<BHBIfI', data[:16])
-            return {"security_id": sec_id, "LTP": f"{ltp:.4f}"}
-        elif first_byte == 4:
-            fields = struct.unpack('<BHBIfHIfIIIffff', data[:50])
-            return {"security_id": fields[3], "LTP": f"{fields[4]:.4f}", "volume": fields[8]}
-        elif first_byte == 8:
-            fields = struct.unpack('<BHBIfHIfIIIIIIffff100s', data[:162])
-            return {"security_id": fields[3], "LTP": f"{fields[4]:.4f}", "volume": fields[8]}
-        elif first_byte == 50:
+        if first_byte == 50:
             code = struct.unpack('<BHBIH', data[:10])[4]
             reason = _DISCONNECT_CODES.get(code, f"unknown code {code}")
             logger.error("[Dhan] ✗ SERVER DISCONNECT  code=%d  %s", code, reason)
@@ -60,8 +55,39 @@ def _parse_tick(data: bytes) -> Optional[dict]:
             elif code == 805:
                 logger.error("[Dhan]   → close other Dhan API sessions (max connections exceeded)")
             return None
+
+        # All Dhan v2 data packets share the same 12-byte header layout:
+        #   B (1) packet_type | H (2) msg_len | B (1) exchange | I (4) security_id | f (4) ltp
+        # Packet types 2, 4, 8 are documented; currency may arrive as type 1, 3, 6, etc.
+        if len(data) < 12:
+            return None
+
+        _, _, _, sec_id, ltp = struct.unpack('<BHBIf', data[:12])
+        if ltp <= 0:
+            return None
+
+        result: dict = {"security_id": sec_id, "LTP": f"{ltp:.4f}"}
+
+        # Enrich with volume for the larger packet types
+        if first_byte == 4 and len(data) >= 50:
+            fields = struct.unpack('<BHBIfHIfIIIffff', data[:50])
+            result["volume"] = fields[8]
+        elif first_byte == 8 and len(data) >= 50:
+            fields = struct.unpack('<BHBIfHIfIIIffff', data[:50])
+            result["volume"] = fields[8]
+        elif first_byte not in (2, 4, 8):
+            # Unknown type — log once per type so we can identify currency packet format
+            cnt = _unknown_packet_types.get(first_byte, 0) + 1
+            _unknown_packet_types[first_byte] = cnt
+            if cnt <= 3:
+                logger.info(
+                    "[Dhan] packet type=%d len=%d sec_id=%s ltp=%s (new type — may be currency/F&O format)",
+                    first_byte, len(data), sec_id, ltp,
+                )
+
+        return result
     except Exception as exc:
-        logger.debug("[Dhan] parse error  byte=%d  err=%s", first_byte, exc)
+        logger.debug("[Dhan] parse error  byte=%d  len=%d  err=%s", first_byte, len(data), exc)
     return None
 
 
