@@ -33,6 +33,11 @@ SEGMENT_LABEL = {
     "BSE_FNO":  "BSE F&O",
     "MCX_COMM": "MCX",
     "BSE_CURR": "BSE CURR",
+    # Dhan scrip master CSV short codes
+    "C": "NSE CURR",
+    "E": "NSE EQ",
+    "D": "NSE F&O",
+    "M": "MCX",
 }
 
 # instrument_type → short badge
@@ -54,6 +59,23 @@ DEFAULT_LOT = {
     "NSE_FNO":  50,
     "NSE_CURR": 1000,
     "MCX_COMM": 1,
+    "C": 1000,   # CSV short code for NSE_CURR
+}
+
+# CSV short segment codes → full API segment names (for WebSocket subscription)
+SEGMENT_ALIASES: dict[str, str] = {
+    "C": "NSE_CURR",
+    "E": "NSE_EQ",
+    "D": "NSE_FNO",
+    "M": "MCX_COMM",
+}
+
+# Known correct lot sizes for currency futures (CSV often shows 1)
+CURRENCY_LOT_SIZES: dict[str, int] = {
+    "USDINR": 1000,
+    "EURINR": 1000,
+    "GBPINR": 1000,
+    "JPYINR": 100_000,
 }
 
 
@@ -355,31 +377,31 @@ def build_instrument_map(
                 logger.warning("[Instruments] %s not found in scrip master", sym)
 
         for pair in currency_symbols:
-            # Try NSE_CURR segment first, then broaden search if nothing found
-            hits = _scrip_master.search(pair, segments=["NSE_CURR"], limit=20)
+            # Dhan CSV uses "C" as the currency segment code; API uses "NSE_CURR".
+            # Search both to handle either CSV format.
+            hits = _scrip_master.search(pair, segments=["NSE_CURR", "C"], limit=20)
             futures = [h for h in hits if h["instrument_type"] == "FUTCUR" and h["expiry"]]
 
             if not futures:
-                # Broader fallback: search all segments for anything currency-like
+                # Broader fallback: search all segments, accept any FUTCUR contract
                 all_hits = _scrip_master.search(pair, limit=30)
-                logger.info("[Instruments] %s — NSE_CURR gave 0, broad search found %d: %s",
+                logger.info("[Instruments] %s — targeted search gave 0, broad search found %d: %s",
                             pair, len(all_hits),
                             [(h["segment"], h["instrument_type"], h["symbol"]) for h in all_hits[:5]])
-                # Accept any segment that looks like currency futures
-                futures = [
-                    h for h in all_hits
-                    if h["expiry"] and (
-                        h["instrument_type"] in ("FUTCUR", "FUTIDX", "FUTSTK") or
-                        "CUR" in h["segment"].upper()
-                    )
-                ]
+                futures = [h for h in all_hits if h["expiry"] and h["instrument_type"] == "FUTCUR"]
 
             futures.sort(key=lambda h: h["expiry"])
             if futures:
                 f = futures[0]
-                result[pair] = (f["segment"], f["security_id"], f["lot_size"])
-                logger.info("[Instruments] %s → seg=%s  sid=%s  expiry=%s  lot=%d",
-                            pair, f["segment"], f["security_id"], f["expiry"], f["lot_size"])
+                # Normalize segment: CSV "C" → API "NSE_CURR" for WebSocket subscription
+                seg = SEGMENT_ALIASES.get(f["segment"], f["segment"])
+                # CSV lot_size is often 1 for currency; use known correct values
+                lot = CURRENCY_LOT_SIZES.get(pair, f["lot_size"] or 1000)
+                if lot < 100:
+                    lot = CURRENCY_LOT_SIZES.get(pair, 1000)
+                result[pair] = (seg, f["security_id"], lot)
+                logger.info("[Instruments] %s → seg=%s (csv=%s)  sid=%s  expiry=%s  lot=%d",
+                            pair, seg, f["segment"], f["security_id"], f["expiry"], lot)
             else:
                 logger.warning("[Instruments] no contract found for %s — skipping", pair)
 
@@ -492,7 +514,9 @@ def _raw_currency_search(pair: str) -> list[tuple[str, str, int]]:
             sid = (row.get(c_sid) or "").strip()
             exp_s = (row.get(c_exp) or "").strip()
             lot_s = (row.get(c_lot) or "1000").strip()
-            if "CURR" not in seg.upper() or instr != "FUTCUR":
+            # Accept "C" (CSV short code) or "NSE_CURR" (full API code)
+            seg_up = seg.upper()
+            if not (seg == "C" or "CURR" in seg_up) or instr != "FUTCUR":
                 continue
             if not sym.startswith(pair):
                 continue
@@ -506,11 +530,15 @@ def _raw_currency_search(pair: str) -> list[tuple[str, str, int]]:
                 continue
             if best_exp is None or exp < best_exp:
                 best_exp = exp
+                # Normalize segment and fix lot size
+                norm_seg = SEGMENT_ALIASES.get(seg, seg)
                 try:
                     lot = int(float(lot_s))
                 except Exception:
                     lot = 1000
-                best = (seg, sid, lot)
+                if lot < 100:
+                    lot = CURRENCY_LOT_SIZES.get(pair, 1000)
+                best = (norm_seg, sid, lot)
         return [best] if best else []
     except Exception as exc:
         logger.error("[Instruments] fallback currency search failed: %s", exc)
