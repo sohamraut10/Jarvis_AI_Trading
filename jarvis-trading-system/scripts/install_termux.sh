@@ -21,17 +21,17 @@ echo "[JARVIS] step 2: pydantic..."
 # First try: grab the pre-built manylinux aarch64 wheel and force-install it
 # (avoids Rust compilation entirely — works because Android kernel is Linux aarch64)
 echo "  trying pre-built Linux aarch64 wheel (no compilation)..."
-mkdir -p /tmp/jarvis_wheels
+mkdir -p "${TMPDIR:-$HOME/.tmp}/jarvis_wheels"
 if pip download \
         --only-binary :all: \
         --platform manylinux_2_17_aarch64 \
         --python-version 313 \
         --implementation cp \
         --abi cp313 \
-        -d /tmp/jarvis_wheels \
+        -d ${TMPDIR:-$HOME/.tmp}/jarvis_wheels \
         "pydantic>=2.9.0" -q 2>/dev/null \
-   && pip install --no-deps /tmp/jarvis_wheels/pydantic_core-*.whl 2>/dev/null \
-   && pip install --no-deps /tmp/jarvis_wheels/pydantic-*.whl 2>/dev/null; then
+   && pip install --no-deps ${TMPDIR:-$HOME/.tmp}/jarvis_wheels/pydantic_core-*.whl 2>/dev/null \
+   && pip install --no-deps ${TMPDIR:-$HOME/.tmp}/jarvis_wheels/pydantic-*.whl 2>/dev/null; then
     echo "  ✓ pydantic (pre-built wheel)"
 else
     # Second try: compile with Rust, single job to avoid OOM on Android
@@ -42,7 +42,7 @@ else
     pip install "pydantic>=2.9.0"
     echo "  ✓ pydantic (compiled)"
 fi
-rm -rf /tmp/jarvis_wheels
+rm -rf ${TMPDIR:-$HOME/.tmp}/jarvis_wheels
 
 # ── Step 3: optional compiled packages ───────────────────────────────────────
 echo ""
