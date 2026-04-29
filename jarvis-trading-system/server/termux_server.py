@@ -381,10 +381,11 @@ class JarvisEngine:
                 continue
 
             if hasattr(self._feed, "add_instrument"):
-                ok = await self._feed.add_instrument(seg, sid, sym, lot) \
-                    if asyncio.iscoroutinefunction(self._feed.add_instrument) \
-                    else self._feed.add_instrument(seg, sid, sym, lot,
-                                                    initial_price=disc.ltp)
+                add_fn = self._feed.add_instrument
+                if asyncio.iscoroutinefunction(add_fn):
+                    ok = await add_fn(seg, sid, sym, lot, initial_price=disc.ltp)
+                else:
+                    ok = add_fn(seg, sid, sym, lot, initial_price=disc.ltp)
                 if ok:
                     logger.info("[AutoDisc] subscribed %s (%s/%s) ltp=%.2f", sym, seg, sid, disc.ltp)
 
@@ -574,12 +575,6 @@ class JarvisEngine:
                 await self._recompute_allocations()
             else:
                 logger.info("regime check  still %s  (%s bars until next)", regime_name, REGIME_RECLASSIFY_BARS)
-
-        # Only scan live symbols (confirmed active by the feed's discovery)
-        if hasattr(self._feed, "active_symbols"):
-            if bar.symbol not in self._feed.active_symbols():
-                logger.debug("bar skipped — %s not yet confirmed live", bar.symbol)
-                return
 
         # Intelligence auto-select: skip symbols not in the recommended set
         if self._auto_select_enabled and self._selected_symbols and \
