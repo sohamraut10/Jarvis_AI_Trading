@@ -1,0 +1,33 @@
+# ── Termux / Android lightweight requirements ─────────────────────────────────
+# Omits torch, stable-baselines3, gymnasium, optuna (~2 GB on desktop).
+# The RL agent and Bayesian optimizer degrade gracefully when these are absent.
+# Install with: pip install -r requirements.termux.txt
+
+# ── Core API & async ──────────────────────────────────────────────────────────
+websockets==12.0
+httpx==0.27.0
+python-dotenv==1.0.1
+pydantic==2.7.1
+
+# ── Dhan broker SDK ───────────────────────────────────────────────────────────
+dhanhq==2.0.1
+
+# ── Numerical / ML (ARM64 wheels available via pip) ───────────────────────────
+numpy==1.26.4
+pandas==2.2.2
+scipy==1.13.0
+scikit-learn==1.4.2
+hmmlearn==0.3.2
+
+# ── Async / scheduling ────────────────────────────────────────────────────────
+aiofiles==23.2.1
+
+# ── Persistence & logging ─────────────────────────────────────────────────────
+sqlalchemy==2.0.30
+aiosqlite==0.20.0
+
+# ── LLM inference (Layer 5 AI Brain) ─────────────────────────────────────────
+anthropic>=0.28.0
+openai>=1.30.0
+google-generativeai>=0.8.0
+pyyaml>=6.0.1

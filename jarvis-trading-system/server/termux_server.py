@@ -48,9 +48,14 @@ from strategies.momentum.vwap_breakout import VWAPBreakout
 from strategies.trend.ema_crossover import EMACrossover
 from strategies.trend.supertrend import SuperTrend
 
+import os
+
 import websockets
 
 logger = logging.getLogger(__name__)
+
+# ── Termux / Android resource profile ─────────────────────────────────────────
+_TERMUX = os.environ.get("TERMUX_MODE", "").lower() in ("1", "true", "yes")
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
@@ -77,14 +82,14 @@ def _load_settings() -> dict:
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-BROADCAST_INTERVAL_MS  = 500
+BROADCAST_INTERVAL_MS  = 1000 if _TERMUX else 500   # halve WS broadcast rate on Android
 REGIME_RECLASSIFY_BARS = 5
 SIGNAL_DEDUP_SECONDS   = 60
 WS_PORT   = 8765
 HTTP_PORT = 8766
 AI_BRAIN_WARMUP_S      = 90     # wait before first brain cycle (bars need to accumulate)
 AI_BRAIN_INTERVAL_S    = 300    # re-run full pipeline every 5 min
-AI_BRAIN_MAX_PER_CYCLE = 3      # max LLM calls per pipeline cycle (cost guard)
+AI_BRAIN_MAX_PER_CYCLE = 2 if _TERMUX else 3        # fewer LLM calls on Android (cost + latency)
 
 WATCH_SYMBOLS: list[str] = []   # populated by auto-discovery (NSE equities)
 CURRENCY_SYMBOLS: list[str] = []   # disabled — focus on NSE equities
@@ -149,7 +154,7 @@ class BarAggregator:
 # ── Simulated Price Feed ───────────────────────────────────────────────────────
 
 class SimulatedFeed:
-    TICK_INTERVAL  = 0.1
+    TICK_INTERVAL  = 0.5 if _TERMUX else 0.1   # 2 ticks/s on Android vs 10/s on desktop
     SIGMA          = 0.0004
     VOL_REGIME_MULT = 3.0
 
@@ -181,25 +186,22 @@ class SimulatedFeed:
 
     def add_instrument(
         self,
-        exchange_segment: str,
-        security_id: str,
-        symbol: str,
+        exchange_segment: str = "",
+        security_id: str = "",
+        symbol: str = "",
         lot_size: int = 1,
         initial_price: Optional[float] = None,
     ) -> bool:
-        """Dynamically add a symbol to the simulation."""
-        if symbol not in self._symbols:
-            self._symbols.append(symbol)
+        if symbol and symbol not in self._symbols:
             price = initial_price or BASE_PRICES.get(symbol, 100.0)
             self._prices[symbol] = price
-            logger.info("[SimFeed] added %s  start_price=%.4f", symbol, price)
+            self._symbols.append(symbol)
         return True
 
     def remove_symbol(self, symbol: str) -> None:
         if symbol in self._symbols:
             self._symbols.remove(symbol)
             self._prices.pop(symbol, None)
-            logger.info("[SimFeed] removed %s", symbol)
 
 # ── JARVIS Engine ──────────────────────────────────────────────────────────────
 
@@ -231,9 +233,12 @@ class JarvisEngine:
         self._regime          = Regime.UNKNOWN
         self._regime_features: dict = {}
         self._allocations: dict[str, float] = {}
-        self._recent_signals: deque[dict] = deque(maxlen=50)
-        self._close_history: dict[str, deque] = defaultdict(lambda: deque(maxlen=250))
-        self._bar_history: dict[str, deque] = defaultdict(lambda: deque(maxlen=500))
+        _sig_q   = 20  if _TERMUX else 50
+        _close_q = 120 if _TERMUX else 250
+        _bar_q   = 200 if _TERMUX else 500
+        self._recent_signals: deque[dict] = deque(maxlen=_sig_q)
+        self._close_history: dict[str, deque] = defaultdict(lambda: deque(maxlen=_close_q))
+        self._bar_history: dict[str, deque] = defaultdict(lambda: deque(maxlen=_bar_q))
         self._bars_since_reclassify = 0
         self._signal_dedup: dict[str, datetime] = {}
         self._disabled_strategies: set[str] = set()
@@ -255,7 +260,7 @@ class JarvisEngine:
         self._decision_engine  = DecisionEngine(self._router, self._cost_throttle)
         self._trade_monitor    = TradeMonitor()
         self._action_executor  = ActionExecutor(self._trade_monitor)
-        self._ai_decisions: deque[dict] = deque(maxlen=50)
+        self._ai_decisions: deque[dict] = deque(maxlen=20 if _TERMUX else 50)
         self._ai_brain_enabled = True
         # ── Auto-discovery (market-wide NSE scanner) ──────────────────────────
         from intelligence.auto_discoverer import AutoDiscoverer
@@ -1154,6 +1159,11 @@ async def main() -> None:
         level=getattr(logging, cfg.get("log_level", "INFO"), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    if _TERMUX:
+        logger.info(
+            "TERMUX mode active — tick_interval=%.1fs broadcast=%dms max_llm_calls=%d",
+            SimulatedFeed.TICK_INTERVAL, BROADCAST_INTERVAL_MS, AI_BRAIN_MAX_PER_CYCLE,
+        )
 
     # Inject settings-stored LLM API keys into env vars (only if not already set externally)
     import os
