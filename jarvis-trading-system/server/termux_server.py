@@ -70,6 +70,7 @@ _DEFAULTS: dict = {
     "hmm_states": 4, "regime_lookback_bars": 200,
     "sharpe_rank_window_days": 20, "log_level": "INFO",
     "intent_log_path": "logs/intent.jsonl", "pnl_db_path": "data/pnl.db",
+    "feed_type": "auto",   # auto → Dhan if credentials set, else yfinance
 }
 
 def _load_settings() -> dict:
@@ -1320,26 +1321,20 @@ async def _handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
 
 def _build_feed(cfg: dict):
     """
-    Feed priority:
-      1. YFinanceFeed  — when feed_type="yfinance" (default on local, no account needed)
-      2. DhanFeed      — when dhan credentials are set in settings.json
-      3. SimulatedFeed — last resort fallback
+    Feed priority (feed_type="auto" or omitted):
+      1. DhanFeed      — when dhan_client_id + dhan_access_token are present
+      2. YFinanceFeed  — free forex fallback, no account needed
+      3. SimulatedFeed — last resort
+
+    Override with feed_type="dhan" | "yfinance" | "simulated" in settings.json.
     """
-    feed_type    = cfg.get("feed_type", "yfinance").strip().lower()
+    feed_type    = cfg.get("feed_type", "auto").strip().lower()
     client_id    = cfg.get("dhan_client_id", "").strip()
     access_token = cfg.get("dhan_access_token", "").strip()
-
-    # ── YFinance (default) ────────────────────────────────────────────────────
-    if feed_type == "yfinance":
-        try:
-            from core.feeds.yfinance_feed import YFinanceFeed
-            logger.info("Feed: YFinanceFeed  pairs=%s", ", ".join(FOREX_SYMBOLS))
-            return YFinanceFeed(FOREX_SYMBOLS)
-        except Exception as exc:
-            logger.warning("YFinanceFeed failed (%s) — falling back to SimulatedFeed", exc)
+    has_dhan     = bool(client_id and access_token)
 
     # ── Dhan live feed ────────────────────────────────────────────────────────
-    elif feed_type == "dhan" or (feed_type != "simulated" and client_id and access_token):
+    if feed_type == "dhan" or (feed_type == "auto" and has_dhan):
         try:
             from core.feeds.dhan_feed import DhanFeed
             logger.info("Feed: DhanFeed  equity=%s  currency=%s",
@@ -1349,7 +1344,16 @@ def _build_feed(cfg: dict):
                             currency_symbols=CURRENCY_SYMBOLS or None,
                             commodity_symbols=MCX_SYMBOLS or None)
         except Exception as exc:
-            logger.warning("DhanFeed failed (%s) — falling back to SimulatedFeed", exc)
+            logger.warning("DhanFeed failed (%s) — falling back to YFinanceFeed", exc)
+
+    # ── YFinance (free forex, ~15s delay) ─────────────────────────────────────
+    if feed_type in ("yfinance", "auto") and feed_type != "dhan":
+        try:
+            from core.feeds.yfinance_feed import YFinanceFeed
+            logger.info("Feed: YFinanceFeed  pairs=%s", ", ".join(FOREX_SYMBOLS))
+            return YFinanceFeed(FOREX_SYMBOLS)
+        except Exception as exc:
+            logger.warning("YFinanceFeed failed (%s) — falling back to SimulatedFeed", exc)
 
     # ── Simulated fallback ────────────────────────────────────────────────────
     all_syms = FOREX_SYMBOLS or (WATCH_SYMBOLS + CURRENCY_SYMBOLS + MCX_SYMBOLS)
