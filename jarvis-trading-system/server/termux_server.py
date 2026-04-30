@@ -379,7 +379,7 @@ class JarvisEngine:
 
     async def _subscribe_discoveries(self, discoveries) -> None:
         """Subscribe top discovered instruments to the live feed if not already tracked."""
-        from core.feeds.dhan_instruments import get_scrip_master
+        from core.feeds.dhan_instruments import get_scrip_master, SEGMENT_ALIASES
         sm = get_scrip_master()
 
         for disc in discoveries:
@@ -392,21 +392,24 @@ class JarvisEngine:
             elif sym in getattr(self._feed, "_symbols", []):
                 continue
 
-            # Look up Dhan security ID via scrip master
-            seg = disc.segment
+            # Look up Dhan security ID via scrip master.
+            # Scrip master stores raw CSV segment codes ("E", "C", "D") not the API names
+            # ("NSE_EQ", "NSE_CURR", "NSE_FNO"). Normalise before comparing.
+            seg = disc.segment   # "NSE_EQ" from AutoDiscoverer
             sid = ""
             lot = 1
             if sm.is_loaded():
-                hits = sm.search(sym, limit=5)
+                hits = sm.search(sym, limit=10)
                 for h in hits:
-                    if h.get("symbol") == sym and h.get("segment") == seg:
+                    norm_seg = SEGMENT_ALIASES.get(h.get("segment", ""), h.get("segment", ""))
+                    if h.get("symbol") == sym and norm_seg == seg:
                         sid = str(h.get("security_id", ""))
                         lot = int(h.get("lot_size") or 1)
                         break
                 if not sid and hits:
-                    # Accept first NSE_EQ match by symbol prefix
                     for h in hits:
-                        if h.get("symbol", "").startswith(sym) and "EQ" in h.get("segment", ""):
+                        norm_seg = SEGMENT_ALIASES.get(h.get("segment", ""), h.get("segment", ""))
+                        if h.get("symbol", "").startswith(sym) and "EQ" in norm_seg:
                             sid = str(h.get("security_id", ""))
                             lot = int(h.get("lot_size") or 1)
                             break

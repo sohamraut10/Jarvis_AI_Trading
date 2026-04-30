@@ -227,10 +227,14 @@ class DhanFeed:
         )
 
         if not instrument_map:
-            logger.error("[Dhan] no instruments resolved — falling back to SimulatedFeed")
-            await self._fallback(tick_callback)
-            return
-
+            logger.warning(
+                "[Dhan] no static instruments configured — starting WS ready for "
+                "auto-discovery subscriptions (add watch_symbols/currency_symbols to "
+                "data/settings.json to pre-load instruments)"
+            )
+            # Don't abort — keep going so add_instrument() can subscribe dynamically
+            # as auto-discovery finds stocks. The no-ticks watchdog will fall back to
+            # SimulatedFeed if nothing subscribes within %ds.", _NO_TICKS_FALLBACK_SECS
         # Populate instance vars so dynamic add_instrument() works after startup
         self._id_to_sym = {sid: sym for sym, (_, sid, _) in instrument_map.items()}
         self._sub_list  = [
@@ -396,15 +400,20 @@ class DhanFeed:
                     except asyncio.TimeoutError:
                         pass   # no greeting — proceed normally
 
-                    # Build sub msg from current instance vars (includes dynamically added)
-                    sub_msg = json.dumps({
-                        "RequestCode": 15,
-                        "InstrumentCount": len(self._sub_list),
-                        "InstrumentList": self._sub_list,
-                    })
-                    await ws.send(sub_msg)
-                    logger.info("[Dhan] subscription sent (%d instruments) — waiting for ticks…",
-                                len(self._sub_list))
+                    # Build sub msg from current instance vars (includes dynamically added).
+                    # Don't send an empty subscription — Dhan disconnects on InstrumentCount=0.
+                    # Instead wait; add_instrument() will send individual subs when auto-discovery fires.
+                    if self._sub_list:
+                        sub_msg = json.dumps({
+                            "RequestCode": 15,
+                            "InstrumentCount": len(self._sub_list),
+                            "InstrumentList": self._sub_list,
+                        })
+                        await ws.send(sub_msg)
+                        logger.info("[Dhan] subscription sent (%d instruments) — waiting for ticks…",
+                                    len(self._sub_list))
+                    else:
+                        logger.info("[Dhan] connected — no instruments yet, awaiting auto-discovery…")
 
                     while self._running:
                         try:
