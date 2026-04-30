@@ -382,6 +382,10 @@ class JarvisEngine:
         from core.feeds.dhan_instruments import get_scrip_master, SEGMENT_ALIASES
         sm = get_scrip_master()
 
+        # Is DhanFeed already running in SimulatedFeed fallback?
+        sim_fallback = getattr(self._feed, "_sim_fallback", None)
+
+        subscribed = 0
         for disc in discoveries:
             sym = disc.symbol
             # Skip if already receiving ticks
@@ -400,22 +404,43 @@ class JarvisEngine:
             lot = 1
             if sm.is_loaded():
                 hits = sm.search(sym, limit=10)
+                if not hits:
+                    logger.info("[AutoDisc] scrip master: no hits for %s", sym)
                 for h in hits:
-                    norm_seg = SEGMENT_ALIASES.get(h.get("segment", ""), h.get("segment", ""))
-                    if h.get("symbol") == sym and norm_seg == seg:
+                    raw_seg  = h.get("segment", "")
+                    norm_seg = SEGMENT_ALIASES.get(raw_seg, raw_seg)
+                    h_sym    = h.get("symbol", "")
+                    if h_sym == sym and norm_seg == seg:
                         sid = str(h.get("security_id", ""))
                         lot = int(h.get("lot_size") or 1)
+                        logger.debug("[AutoDisc] exact match %s  raw_seg=%s  sid=%s", sym, raw_seg, sid)
                         break
                 if not sid and hits:
                     for h in hits:
-                        norm_seg = SEGMENT_ALIASES.get(h.get("segment", ""), h.get("segment", ""))
+                        raw_seg  = h.get("segment", "")
+                        norm_seg = SEGMENT_ALIASES.get(raw_seg, raw_seg)
                         if h.get("symbol", "").startswith(sym) and "EQ" in norm_seg:
                             sid = str(h.get("security_id", ""))
                             lot = int(h.get("lot_size") or 1)
+                            logger.debug("[AutoDisc] prefix match %s  raw_seg=%s  sid=%s", sym, raw_seg, sid)
                             break
+            else:
+                logger.warning("[AutoDisc] scrip master not loaded yet")
 
             if not sid:
-                logger.debug("[AutoDisc] no security_id for %s — skipping subscription", sym)
+                logger.info("[AutoDisc] no security_id for %s (seg=%s) — %s",
+                            sym, seg,
+                            "adding to SimulatedFeed directly" if sim_fallback else "skipping")
+                # If already in SimulatedFeed fallback, add directly with LTP from NSE discovery
+                if sim_fallback is not None and disc.ltp and disc.ltp > 0:
+                    ok = sim_fallback.add_instrument("", "", sym, 1, initial_price=disc.ltp)
+                    if ok:
+                        # Also register in DhanFeed's _all_symbols so scanner_data shows it
+                        if hasattr(self._feed, "_all_symbols") and sym not in self._feed._all_symbols:
+                            self._feed._all_symbols.append(sym)
+                            self._feed._sym_ticks[sym] = 0
+                        subscribed += 1
+                        logger.info("[AutoDisc] ✓ %s → SimulatedFeed  ltp=%.2f", sym, disc.ltp)
                 continue
 
             if hasattr(self._feed, "add_instrument"):
@@ -425,7 +450,13 @@ class JarvisEngine:
                 else:
                     ok = add_fn(seg, sid, sym, lot, initial_price=disc.ltp)
                 if ok:
-                    logger.info("[AutoDisc] subscribed %s (%s/%s) ltp=%.2f", sym, seg, sid, disc.ltp)
+                    subscribed += 1
+                    logger.info("[AutoDisc] ✓ subscribed %s (%s/%s) ltp=%.2f", sym, seg, sid, disc.ltp)
+
+        if subscribed:
+            logger.info("[AutoDisc] total newly subscribed this cycle: %d", subscribed)
+        else:
+            logger.info("[AutoDisc] no new subscriptions this cycle (all already tracked or lookup failed)")
 
     @staticmethod
     def _disc_to_dict(d) -> dict:
