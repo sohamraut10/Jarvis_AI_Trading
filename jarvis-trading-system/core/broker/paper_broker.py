@@ -53,7 +53,6 @@ class PaperBroker(BaseBroker):
         kill_switch_amount: float = 300.0,
         slippage_pct: float = _DEFAULT_SLIPPAGE_PCT,
     ) -> None:
-        self._capital = initial_capital           # available cash
         self._initial_capital = initial_capital
         self._kill_switch_amount = kill_switch_amount  # hard daily loss limit
         self._slippage_pct = slippage_pct
@@ -149,11 +148,11 @@ class PaperBroker(BaseBroker):
                     pos.avg_price = fill_price
 
         # ── Update cash ────────────────────────────────────────────────────────
-        cost = fill_price * qty
-        if order.side == OrderSide.BUY:
-            self._capital -= cost
-        else:
-            self._capital += cost
+        # For intraday paper trading we do NOT deduct/credit full notional;
+        # that would make capital fluctuate with every fill and go negative for
+        # futures/options positions whose notional dwarfs the account.
+        # Instead, realized P&L flows through pos.realized_pnl and available
+        # capital = initial_capital + cumulative_realized_pnl.
 
         logger.info(
             "FILL symbol=%s side=%s qty=%d price=%.2f order_id=%s",
@@ -319,11 +318,13 @@ class PaperBroker(BaseBroker):
         return {s: p for s, p in self._positions.items() if p.qty != 0}
 
     async def get_available_capital(self) -> float:
-        return self._capital
+        # Base capital + all realized gains/losses so far
+        realized = sum(p.realized_pnl for p in self._positions.values())
+        return max(self._initial_capital + realized, 0.0)
 
     async def get_portfolio_value(self) -> float:
-        unrealized = sum(p.unrealized_pnl for p in self._positions.values())
-        return self._capital + unrealized
+        # What the account is actually worth right now
+        return round(self._initial_capital + self._compute_daily_pnl(), 2)
 
     async def get_daily_pnl(self) -> float:
         async with self._lock:
@@ -394,12 +395,14 @@ class PaperBroker(BaseBroker):
 
     def snapshot(self) -> dict:
         """Return a JSON-serialisable summary for the WebSocket feed."""
+        realized   = sum(p.realized_pnl   for p in self._positions.values())
+        unrealized = sum(p.unrealized_pnl for p in self._positions.values())
+        daily_pnl  = realized + unrealized
         return {
-            "capital": round(self._capital, 2),
-            "portfolio_value": round(
-                self._capital + sum(p.unrealized_pnl for p in self._positions.values()), 2
-            ),
-            "daily_pnl": round(self._compute_daily_pnl(), 2),
+            "capital":        round(self._initial_capital, 2),   # stable base
+            "realized_pnl":   round(realized, 2),
+            "portfolio_value": round(self._initial_capital + daily_pnl, 2),
+            "daily_pnl":      round(daily_pnl, 2),
             "kill_switch_active": self._killed,
             "open_positions": {
                 s: {
