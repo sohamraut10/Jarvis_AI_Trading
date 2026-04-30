@@ -23,6 +23,7 @@ import asyncio
 import json
 import logging
 import pathlib
+import time as _time
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from typing import Optional
@@ -266,6 +267,10 @@ class JarvisEngine:
         self._running = False
         self._tasks: list[asyncio.Task] = []
         self._tick_count = 0
+        self._started_at = _time.monotonic()
+        self._tick_timestamps: deque = deque(maxlen=200)
+        self._signal_total = 0
+        self._strategy_last: dict[str, dict] = {}
         # Intelligence / pair-selector
         self._pair_selector         = PairSelector()
         self._intelligence_scores: list[dict] = []
@@ -632,6 +637,7 @@ class JarvisEngine:
             return
         try:
             self._tick_count += 1
+            self._tick_timestamps.append(_time.monotonic())
             await self._broker.update_ltp(symbol, ltp)
             self._close_history[symbol].append(ltp)
             # Log feed alive every 500 ticks (~50s with SimulatedFeed)
@@ -759,6 +765,13 @@ class JarvisEngine:
             reason = "kill switch active" if self._broker.is_killed() else getattr(decision, 'reason', 'risk gate')
             logger.info("   ORDER REJECTED  reason=%s", reason)
 
+        self._signal_total += 1
+        self._strategy_last[signal.strategy_id] = {
+            "sym":  signal.symbol,
+            "side": signal.side.value,
+            "t":    _utcnow().isoformat(),
+            "approved": decision.approved,
+        }
         self._recent_signals.append({
             "ts": signal.timestamp.isoformat(), "strategy": signal.strategy_id,
             "symbol": signal.symbol, "side": signal.side.value,
@@ -803,11 +816,28 @@ class JarvisEngine:
                                "is_currency":  is_forex or s.endswith("INR"),
                                "is_commodity": s in MCX_SYMBOLS,
                                "exchange":     "FOREX" if is_forex else ("MCX" if s in MCX_SYMBOLS else "NSE")}
+        _now_m = _time.monotonic()
+        _recent_rate = sum(1 for _t in self._tick_timestamps if _now_m - _t <= 10.0)
+        _strategy_states = {}
+        for _sid in self._strategies:
+            _strategy_states[_sid] = {
+                "disabled":  _sid in self._disabled_strategies,
+                "active_regime": self._regime == Regime.UNKNOWN or self._strategies[_sid].is_active(self._regime),
+                "allocation": self._allocations.get(_sid, 0.0),
+                "last": self._strategy_last.get(_sid),
+            }
         return {
             "type": "snapshot", "ts": _utcnow().isoformat(),
             "regime": str(self._regime), "regime_features": self._regime_features,
             "broker": self._broker.snapshot(), "allocations": self._allocations,
             "signals": list(self._recent_signals)[-10:],
+            "system": {
+                "uptime_secs":   round(_now_m - self._started_at, 0),
+                "tick_rate":     round(_recent_rate / 10.0, 1),
+                "tick_total":    self._tick_count,
+                "signal_total":  self._signal_total,
+                "strategy_states": _strategy_states,
+            },
             "ltp": {s: round(v, 5) if s in FOREX_SYMBOLS or s.endswith("INR") else round(v, 2)
                     for s, v in self._broker._ltp.items()},
             "scanner": scanner,

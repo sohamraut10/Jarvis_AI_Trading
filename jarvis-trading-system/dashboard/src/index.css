@@ -5,3 +5,22 @@
 body {
   font-family: "JetBrains Mono", "Fira Code", monospace;
 }
+
+@keyframes scanline {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}
+
+@keyframes ticktape {
+  0%   { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.activity-row-enter {
+  animation: fadeIn 0.3s ease-out;
+}
