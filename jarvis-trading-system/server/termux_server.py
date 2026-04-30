@@ -10,6 +10,15 @@ Start: python -m server.termux_server
 """
 from __future__ import annotations
 
+import sys
+import pathlib as _pathlib
+
+# Ensure the project root (jarvis-trading-system/) is on sys.path so that
+# `core`, `intelligence`, `strategies`, etc. resolve regardless of cwd.
+_ROOT = _pathlib.Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 import asyncio
 import json
 import logging
