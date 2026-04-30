@@ -382,8 +382,12 @@ class JarvisEngine:
         from core.feeds.dhan_instruments import get_scrip_master, SEGMENT_ALIASES
         sm = get_scrip_master()
 
-        # Is DhanFeed already running in SimulatedFeed fallback?
+        # Is DhanFeed already in SimulatedFeed fallback?
         sim_fallback = getattr(self._feed, "_sim_fallback", None)
+
+        # Does DhanFeed have zero static instruments (pure auto-discovery mode)?
+        feed_all_syms = getattr(self._feed, "_all_symbols", None)
+        pure_auto = (feed_all_syms is not None and len(feed_all_syms) == 0)
 
         subscribed = 0
         for disc in discoveries:
@@ -396,9 +400,6 @@ class JarvisEngine:
             elif sym in getattr(self._feed, "_symbols", []):
                 continue
 
-            # Look up Dhan security ID via scrip master.
-            # Scrip master stores raw CSV segment codes ("E", "C", "D") not the API names
-            # ("NSE_EQ", "NSE_CURR", "NSE_FNO"). Normalise before comparing.
             seg = disc.segment   # "NSE_EQ" from AutoDiscoverer
             sid = ""
             lot = 1
@@ -406,43 +407,46 @@ class JarvisEngine:
                 hits = sm.search(sym, limit=10)
                 if not hits:
                     logger.info("[AutoDisc] scrip master: no hits for %s", sym)
+                else:
+                    # Log first hit to show actual stored segment/symbol format (first call only)
+                    if subscribed == 0 and sym == discoveries[0].symbol:
+                        h0 = hits[0]
+                        logger.info("[AutoDisc] scrip master sample for %s: "
+                                    "symbol=%r segment=%r security_id=%r",
+                                    sym, h0.get("symbol"), h0.get("segment"), h0.get("security_id"))
                 for h in hits:
                     raw_seg  = h.get("segment", "")
                     norm_seg = SEGMENT_ALIASES.get(raw_seg, raw_seg)
                     h_sym    = h.get("symbol", "")
-                    if h_sym == sym and norm_seg == seg:
+                    # Accept exact match OR any EQ-like segment (handles "E", "NSE_EQ", "NSE", etc.)
+                    is_equity_seg = ("EQ" in norm_seg or raw_seg in ("E", "NSE_EQ"))
+                    if h_sym == sym and is_equity_seg:
                         sid = str(h.get("security_id", ""))
                         lot = int(h.get("lot_size") or 1)
-                        logger.debug("[AutoDisc] exact match %s  raw_seg=%s  sid=%s", sym, raw_seg, sid)
                         break
                 if not sid and hits:
                     for h in hits:
                         raw_seg  = h.get("segment", "")
                         norm_seg = SEGMENT_ALIASES.get(raw_seg, raw_seg)
-                        if h.get("symbol", "").startswith(sym) and "EQ" in norm_seg:
+                        is_equity_seg = ("EQ" in norm_seg or raw_seg in ("E", "NSE_EQ"))
+                        if h.get("symbol", "").startswith(sym) and is_equity_seg:
                             sid = str(h.get("security_id", ""))
                             lot = int(h.get("lot_size") or 1)
-                            logger.debug("[AutoDisc] prefix match %s  raw_seg=%s  sid=%s", sym, raw_seg, sid)
                             break
+                # Last resort: take the very first hit regardless of segment
+                if not sid and hits:
+                    h = hits[0]
+                    sid = str(h.get("security_id", ""))
+                    lot = int(h.get("lot_size") or 1)
+                    logger.info("[AutoDisc] last-resort match %s: "
+                                "symbol=%r seg=%r sid=%s", sym, h.get("symbol"), h.get("segment"), sid)
             else:
                 logger.warning("[AutoDisc] scrip master not loaded yet")
 
             if not sid:
-                logger.info("[AutoDisc] no security_id for %s (seg=%s) — %s",
-                            sym, seg,
-                            "adding to SimulatedFeed directly" if sim_fallback else "skipping")
-                # If already in SimulatedFeed fallback, add directly with LTP from NSE discovery
-                if sim_fallback is not None and disc.ltp and disc.ltp > 0:
-                    ok = sim_fallback.add_instrument("", "", sym, 1, initial_price=disc.ltp)
-                    if ok:
-                        # Also register in DhanFeed's _all_symbols so scanner_data shows it
-                        if hasattr(self._feed, "_all_symbols") and sym not in self._feed._all_symbols:
-                            self._feed._all_symbols.append(sym)
-                            self._feed._sym_ticks[sym] = 0
-                        subscribed += 1
-                        logger.info("[AutoDisc] ✓ %s → SimulatedFeed  ltp=%.2f", sym, disc.ltp)
-                continue
+                logger.info("[AutoDisc] no hits at all for %s — adding to feed at disc.ltp", sym)
 
+            # Always try add_instrument — it works for both Dhan WS and SimFeed fallback
             if hasattr(self._feed, "add_instrument"):
                 add_fn = self._feed.add_instrument
                 if asyncio.iscoroutinefunction(add_fn):
@@ -451,12 +455,31 @@ class JarvisEngine:
                     ok = add_fn(seg, sid, sym, lot, initial_price=disc.ltp)
                 if ok:
                     subscribed += 1
-                    logger.info("[AutoDisc] ✓ subscribed %s (%s/%s) ltp=%.2f", sym, seg, sid, disc.ltp)
+                    logger.info("[AutoDisc] ✓ %s  sid=%s  ltp=%.2f", sym, sid or "(sim)", disc.ltp)
+
+            # In pure auto-discovery mode with no scrip master sid, also seed SimFeed directly
+            # so ticks start immediately without waiting for the 5-min watchdog
+            if pure_auto and not sid and disc.ltp and disc.ltp > 0:
+                if sim_fallback is None:
+                    # Bootstrap an immediate SimFeed for this symbol via DhanFeed's fallback mechanism
+                    if hasattr(self._feed, "_sim_fallback") and self._feed._sim_fallback is None:
+                        # Trigger early fallback only once
+                        if not getattr(self, "_early_simfeed_started", False):
+                            self._early_simfeed_started = True
+                            logger.info("[AutoDisc] no Dhan ticks + no scrip sids → starting SimFeed now")
+                            asyncio.create_task(self._feed._fallback(self._on_tick))
+                        sim_fallback = getattr(self._feed, "_sim_fallback", None)
+                if sim_fallback is not None and sym not in getattr(sim_fallback, "_symbols", []):
+                    sim_fallback.add_instrument("", "", sym, 1, initial_price=disc.ltp)
+                    if hasattr(self._feed, "_all_symbols") and sym not in self._feed._all_symbols:
+                        self._feed._all_symbols.append(sym)
+                        self._feed._sym_ticks[sym] = 0
+                    logger.info("[AutoDisc] ✓ %s → early SimFeed  ltp=%.2f", sym, disc.ltp)
 
         if subscribed:
-            logger.info("[AutoDisc] total newly subscribed this cycle: %d", subscribed)
+            logger.info("[AutoDisc] total subscribed this cycle: %d", subscribed)
         else:
-            logger.info("[AutoDisc] no new subscriptions this cycle (all already tracked or lookup failed)")
+            logger.info("[AutoDisc] no new subscriptions this cycle")
 
     @staticmethod
     def _disc_to_dict(d) -> dict:
