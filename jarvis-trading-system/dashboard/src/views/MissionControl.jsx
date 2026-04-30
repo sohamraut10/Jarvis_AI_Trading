@@ -159,29 +159,66 @@ const DIR_CFG = {
   SELL: { cls: "text-red-400   border-red-800   bg-red-950/30",    label: "SELL" },
   FLAT: { cls: "text-gray-500  border-gray-700  bg-gray-800/30",   label: "FLAT" },
 };
-const ASSET_CFG = { Equity: "text-blue-400", ETF: "text-purple-400", MCX: "text-orange-400", Currency: "text-cyan-400" };
+const ASSET_CFG = {
+  Equity: "text-blue-400", ETF: "text-purple-400",
+  MCX: "text-orange-400", Currency: "text-cyan-400",
+  "Index Option": "text-yellow-400", "Stock Option": "text-pink-400",
+};
 
 function OpportunityRow({ item, onSubscribe }) {
-  const dir = DIR_CFG[item.direction] ?? DIR_CFG.FLAT;
+  const dir      = DIR_CFG[item.direction] ?? DIR_CFG.FLAT;
   const assetCls = ASSET_CFG[item.asset_class] ?? "text-gray-400";
+  const isOption = item.asset_class === "Index Option" || item.asset_class === "Stock Option";
+  const optSide  = item.option_type === "CE" ? "text-green-400" : item.option_type === "PE" ? "text-red-400" : "";
+
   return (
-    <div className="flex items-center gap-2 py-1.5 border-b border-gray-800/40 last:border-0">
-      <span className="text-[9px] text-gray-700 w-4 text-right tabular-nums shrink-0">{item.rank}</span>
+    <div className="flex items-start gap-2 py-1.5 border-b border-gray-800/40 last:border-0">
+      <span className="text-[9px] text-gray-700 w-4 text-right tabular-nums shrink-0 mt-0.5">{item.rank}</span>
       <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-1.5">
-          <span className="text-xs font-mono font-bold text-gray-200 truncate">{item.symbol}</span>
-          <span className={`text-[8px] font-bold shrink-0 ${assetCls}`}>{item.asset_class}</span>
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {isOption ? (
+            <>
+              <span className="text-xs font-mono font-bold text-gray-200">{item.underlying}</span>
+              <span className={`text-[10px] font-bold tabular-nums text-gray-300`}>
+                {item.strike != null ? Number(item.strike).toLocaleString("en-IN") : ""}
+              </span>
+              <span className={`text-[10px] font-bold ${optSide}`}>{item.option_type}</span>
+              {item.expiry && (
+                <span className="text-[8px] text-gray-600">
+                  {new Date(item.expiry).toLocaleDateString("en-IN", { day: "2-digit", month: "short" })}
+                </span>
+              )}
+              {item.iv != null && (
+                <span className="text-[8px] text-purple-600 border border-purple-900/40 px-1 rounded">
+                  IV {item.iv?.toFixed(1)}%
+                </span>
+              )}
+            </>
+          ) : (
+            <>
+              <span className="text-xs font-mono font-bold text-gray-200 truncate">{item.symbol}</span>
+              <span className={`text-[8px] font-bold shrink-0 ${assetCls}`}>{item.asset_class}</span>
+            </>
+          )}
         </div>
         <div className="text-[9px] text-gray-600 mt-0.5 truncate">{item.reasoning}</div>
+        {isOption && item.underlying_price != null && (
+          <div className="text-[8px] text-gray-700 mt-0.5">
+            spot ₹{Number(item.underlying_price).toLocaleString("en-IN")}
+            {item.open_interest != null && ` · OI ${(item.open_interest / 1000).toFixed(0)}K`}
+          </div>
+        )}
       </div>
       <div className="shrink-0 text-right">
         <div className={`text-[9px] font-mono tabular-nums ${item.change_pct >= 0 ? "text-green-400" : "text-red-400"}`}>
           {item.change_pct >= 0 ? "+" : ""}{item.change_pct?.toFixed(2)}%
         </div>
-        <div className="text-[9px] text-gray-600 font-mono">score {item.score?.toFixed(0)}</div>
+        <div className="text-[9px] text-gray-600 font-mono">
+          {isOption ? `₹${item.ltp?.toFixed(2)}` : `s${item.score?.toFixed(0)}`}
+        </div>
       </div>
-      <span className={`shrink-0 text-[8px] font-bold px-1.5 py-0.5 rounded border tracking-widest ${dir.cls}`}>{dir.label}</span>
-      <button onClick={() => onSubscribe(item)} className="shrink-0 w-5 h-5 flex items-center justify-center rounded border border-gray-800 text-gray-600 hover:text-cyan-400 hover:border-cyan-800 transition-colors text-xs">+</button>
+      <span className={`shrink-0 text-[8px] font-bold px-1.5 py-0.5 rounded border tracking-widest ${dir.cls} mt-0.5`}>{dir.label}</span>
+      <button onClick={() => onSubscribe(item)} className="shrink-0 w-5 h-5 flex items-center justify-center rounded border border-gray-800 text-gray-600 hover:text-cyan-400 hover:border-cyan-800 transition-colors text-xs mt-0.5">+</button>
     </div>
   );
 }

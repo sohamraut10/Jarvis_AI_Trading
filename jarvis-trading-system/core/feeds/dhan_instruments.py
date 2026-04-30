@@ -279,6 +279,97 @@ class ScripMaster:
     def get_by_sid(self, security_id: str) -> Optional[dict]:
         return self._by_sid.get(str(security_id))
 
+    def find_option(
+        self,
+        underlying: str,
+        expiry_iso: str,
+        strike: float,
+        option_type: str,
+        instrument_types: tuple[str, ...] = ("OPTIDX", "OPTSTK"),
+    ) -> Optional[dict]:
+        """
+        Exact lookup of an options contract by underlying + expiry + strike + CE/PE.
+
+        underlying:   e.g. "NIFTY", "BANKNIFTY", "RELIANCE"
+        expiry_iso:   "2026-04-30"
+        strike:       24500.0
+        option_type:  "CE" or "PE"
+        """
+        if not self._loaded:
+            return None
+        u   = underlying.strip().upper()
+        opt = option_type.strip().upper()
+        for inst in self._instruments:
+            if inst.get("instrument_type") not in instrument_types:
+                continue
+            if inst.get("expiry") != expiry_iso:
+                continue
+            if inst.get("option_type") != opt:
+                continue
+            undl = (inst.get("underlying") or inst.get("symbol") or "").upper()
+            sym  = inst.get("symbol", "").upper()
+            if undl != u and sym != u and not sym.startswith(u):
+                continue
+            # Strike match with 0.01 tolerance
+            inst_strike = inst.get("strike")
+            if inst_strike is None:
+                continue
+            if abs(float(inst_strike) - strike) < 0.5:
+                return inst
+        return None
+
+    def near_expiry_options(
+        self,
+        underlying: str,
+        strikes: list[float],
+        option_types: tuple[str, ...] = ("CE", "PE"),
+        max_expiries: int = 2,
+    ) -> list[dict]:
+        """
+        Return all matching options for `underlying` across the nearest `max_expiries` expiry dates.
+        Used by AutoDiscoverer to bulk-look up ATM options.
+        """
+        if not self._loaded:
+            return []
+        u       = underlying.strip().upper()
+        today   = datetime.today().date()
+        OPT_TYPES = {"OPTIDX", "OPTSTK"}
+        expiry_set: set[str] = set()
+        results: list[dict] = []
+
+        # Collect valid near-term expiry dates for this underlying
+        for inst in self._instruments:
+            if inst.get("instrument_type") not in OPT_TYPES:
+                continue
+            undl = (inst.get("underlying") or inst.get("symbol") or "").upper()
+            if undl != u and not undl.startswith(u):
+                continue
+            if not inst.get("expiry"):
+                continue
+            exp = datetime.fromisoformat(inst["expiry"]).date()
+            if exp >= today:
+                expiry_set.add(inst["expiry"])
+
+        near_expiries = sorted(expiry_set)[:max_expiries]
+
+        for inst in self._instruments:
+            if inst.get("instrument_type") not in OPT_TYPES:
+                continue
+            if inst.get("expiry") not in near_expiries:
+                continue
+            if inst.get("option_type") not in option_types:
+                continue
+            undl = (inst.get("underlying") or inst.get("symbol") or "").upper()
+            if undl != u and not undl.startswith(u):
+                continue
+            inst_strike = inst.get("strike")
+            if inst_strike is None:
+                continue
+            if any(abs(float(inst_strike) - s) < 0.5 for s in strikes):
+                results.append(inst)
+
+        return results
+
     def near_month_futures(self, segments: Optional[list[str]] = None) -> list[dict]:
         """Return one near-month futures contract per underlying symbol."""
         today = datetime.today().date()

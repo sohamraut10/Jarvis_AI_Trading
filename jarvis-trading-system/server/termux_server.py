@@ -396,17 +396,13 @@ class JarvisEngine:
         from core.feeds.dhan_instruments import get_scrip_master, SEGMENT_ALIASES
         sm = get_scrip_master()
 
-        # Is DhanFeed already in SimulatedFeed fallback?
-        sim_fallback = getattr(self._feed, "_sim_fallback", None)
-
-        # Does DhanFeed have zero static instruments (pure auto-discovery mode)?
+        sim_fallback  = getattr(self._feed, "_sim_fallback", None)
         feed_all_syms = getattr(self._feed, "_all_symbols", None)
-        pure_auto = (feed_all_syms is not None and len(feed_all_syms) == 0)
+        pure_auto     = (feed_all_syms is not None and len(feed_all_syms) == 0)
 
         subscribed = 0
         for disc in discoveries:
             sym = disc.symbol
-            # Skip if already receiving ticks
             if hasattr(self._feed, "scanner_data"):
                 sd = self._feed.scanner_data()
                 if sym in sd and sd[sym].get("status") in ("live", "stale", "searching"):
@@ -414,48 +410,66 @@ class JarvisEngine:
             elif sym in getattr(self._feed, "_symbols", []):
                 continue
 
-            seg = disc.segment   # "NSE_EQ" from AutoDiscoverer
+            seg = disc.segment   # "NSE_EQ" or "NSE_FNO" etc.
             sid = ""
             lot = 1
-            if sm.is_loaded():
-                hits = sm.search(sym, limit=10)
-                if not hits:
-                    logger.info("[AutoDisc] scrip master: no hits for %s", sym)
+
+            if not sm.is_loaded():
+                logger.warning("[AutoDisc] scrip master not loaded yet")
+            else:
+                # ── Options: use precise strike/expiry/CE-PE lookup ───────────
+                if disc.option_type and disc.strike and disc.expiry and disc.underlying:
+                    inst = sm.find_option(
+                        disc.underlying, disc.expiry,
+                        disc.strike, disc.option_type,
+                    )
+                    if inst:
+                        sid = str(inst.get("security_id", ""))
+                        lot = int(inst.get("lot_size") or 50)  # NSE FNO default 50
+                        logger.info("[AutoDisc] option match  %s  sid=%s  lot=%d",
+                                    sym, sid, lot)
+                    else:
+                        logger.info("[AutoDisc] option not in scrip master: %s  "
+                                    "underlying=%s  strike=%s  expiry=%s  type=%s",
+                                    sym, disc.underlying, disc.strike,
+                                    disc.expiry, disc.option_type)
+
+                # ── Equity: symbol prefix + EQ-segment matching ───────────────
                 else:
-                    # Log first hit to show actual stored segment/symbol format (first call only)
-                    if subscribed == 0 and sym == discoveries[0].symbol:
-                        h0 = hits[0]
-                        logger.info("[AutoDisc] scrip master sample for %s: "
-                                    "symbol=%r segment=%r security_id=%r",
-                                    sym, h0.get("symbol"), h0.get("segment"), h0.get("security_id"))
-                for h in hits:
-                    raw_seg  = h.get("segment", "")
-                    norm_seg = SEGMENT_ALIASES.get(raw_seg, raw_seg)
-                    h_sym    = h.get("symbol", "")
-                    # Accept exact match OR any EQ-like segment (handles "E", "NSE_EQ", "NSE", etc.)
-                    is_equity_seg = ("EQ" in norm_seg or raw_seg in ("E", "NSE_EQ"))
-                    if h_sym == sym and is_equity_seg:
-                        sid = str(h.get("security_id", ""))
-                        lot = int(h.get("lot_size") or 1)
-                        break
-                if not sid and hits:
+                    hits = sm.search(sym, limit=10)
+                    if not hits:
+                        logger.info("[AutoDisc] scrip master: no hits for %s", sym)
+                    else:
+                        if subscribed == 0 and sym == discoveries[0].symbol:
+                            h0 = hits[0]
+                            logger.info("[AutoDisc] scrip master sample for %s: "
+                                        "symbol=%r segment=%r security_id=%r",
+                                        sym, h0.get("symbol"), h0.get("segment"),
+                                        h0.get("security_id"))
                     for h in hits:
                         raw_seg  = h.get("segment", "")
                         norm_seg = SEGMENT_ALIASES.get(raw_seg, raw_seg)
-                        is_equity_seg = ("EQ" in norm_seg or raw_seg in ("E", "NSE_EQ"))
-                        if h.get("symbol", "").startswith(sym) and is_equity_seg:
+                        is_eq    = ("EQ" in norm_seg or raw_seg in ("E", "NSE_EQ"))
+                        if h.get("symbol", "") == sym and is_eq:
                             sid = str(h.get("security_id", ""))
                             lot = int(h.get("lot_size") or 1)
                             break
-                # Last resort: take the very first hit regardless of segment
-                if not sid and hits:
-                    h = hits[0]
-                    sid = str(h.get("security_id", ""))
-                    lot = int(h.get("lot_size") or 1)
-                    logger.info("[AutoDisc] last-resort match %s: "
-                                "symbol=%r seg=%r sid=%s", sym, h.get("symbol"), h.get("segment"), sid)
-            else:
-                logger.warning("[AutoDisc] scrip master not loaded yet")
+                    if not sid and hits:
+                        for h in hits:
+                            raw_seg  = h.get("segment", "")
+                            norm_seg = SEGMENT_ALIASES.get(raw_seg, raw_seg)
+                            is_eq    = ("EQ" in norm_seg or raw_seg in ("E", "NSE_EQ"))
+                            if h.get("symbol", "").startswith(sym) and is_eq:
+                                sid = str(h.get("security_id", ""))
+                                lot = int(h.get("lot_size") or 1)
+                                break
+                    if not sid and hits:
+                        h   = hits[0]
+                        sid = str(h.get("security_id", ""))
+                        lot = int(h.get("lot_size") or 1)
+                        logger.info("[AutoDisc] last-resort match %s: "
+                                    "symbol=%r seg=%r sid=%s",
+                                    sym, h.get("symbol"), h.get("segment"), sid)
 
             if not sid:
                 logger.info("[AutoDisc] no hits at all for %s — adding to feed at disc.ltp", sym)
@@ -498,19 +512,29 @@ class JarvisEngine:
     @staticmethod
     def _disc_to_dict(d) -> dict:
         return {
-            "symbol":        d.symbol,
-            "ltp":           d.ltp,
-            "segment":       d.segment,
-            "asset_class":   d.asset_class,
-            "score":         d.score,
-            "rank":          d.rank,
-            "direction":     d.direction,
-            "change_pct":    d.change_pct,
-            "day_range_pct": d.day_range_pct,
-            "week52_high":   d.week52_high,
-            "week52_low":    d.week52_low,
-            "trend_30d":     d.trend_30d,
-            "reasoning":     d.reasoning,
+            "symbol":           d.symbol,
+            "ltp":              d.ltp,
+            "segment":          d.segment,
+            "asset_class":      d.asset_class,
+            "score":            d.score,
+            "rank":             d.rank,
+            "direction":        d.direction,
+            "change_pct":       d.change_pct,
+            "day_range_pct":    d.day_range_pct,
+            "week52_high":      d.week52_high,
+            "week52_low":       d.week52_low,
+            "trend_30d":        d.trend_30d,
+            "reasoning":        d.reasoning,
+            # Options fields (None for equities)
+            "underlying":       d.underlying,
+            "underlying_price": d.underlying_price,
+            "strike":           d.strike,
+            "option_type":      d.option_type,
+            "expiry":           d.expiry,
+            "open_interest":    d.open_interest,
+            "volume":           d.volume,
+            "iv":               d.iv,
+            "security_id":      d.security_id,
         }
 
     def _run_pair_selection(self) -> None:

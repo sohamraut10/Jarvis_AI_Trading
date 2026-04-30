@@ -129,3 +129,50 @@ class NSEClient:
                     and mkt.get("marketStatus") == "Open"):
                 return True
         return False
+
+    def get_option_chain_index(self, symbol: str = "NIFTY") -> dict:
+        """
+        Fetch the full options chain for an index (NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY).
+
+        Returns a dict with:
+          - underlying_value: float
+          - expiry_dates: list[str]
+          - data: list of strike rows, each with keys:
+              strikePrice, expiryDate,
+              CE: {lastPrice, openInterest, changeinOpenInterest,
+                   totalTradedVolume, impliedVolatility, pChange}
+              PE: {same keys}
+        """
+        self._refresh_cookies()
+        try:
+            r = self._client.get(
+                f"{_NSE_BASE}/api/option-chain-indices",
+                params={"symbol": symbol.upper()},
+            )
+            r.raise_for_status()
+            payload = r.json()
+            records = payload.get("records", {})
+            return {
+                "underlying_value": records.get("underlyingValue", 0.0),
+                "expiry_dates":     records.get("expiryDates", []),
+                "data":             records.get("data", []),
+            }
+        except Exception as exc:
+            logger.error("[NSE] get_option_chain_index(%s) failed: %s", symbol, exc)
+            return {"underlying_value": 0.0, "expiry_dates": [], "data": []}
+
+    def get_index_quote(self, symbol: str) -> dict:
+        """Return a single index quote (used to get current NIFTY/BANKNIFTY level)."""
+        self._refresh_cookies()
+        try:
+            r = self._client.get(
+                f"{_NSE_BASE}/api/equity-stockIndices",
+                params={"index": symbol.upper()},
+            )
+            r.raise_for_status()
+            data = r.json().get("data", [])
+            # First row is the index summary row
+            return data[0] if data else {}
+        except Exception as exc:
+            logger.debug("[NSE] get_index_quote(%s) failed: %s", symbol, exc)
+            return {}
