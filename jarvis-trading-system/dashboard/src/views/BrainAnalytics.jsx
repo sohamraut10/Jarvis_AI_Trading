@@ -354,6 +354,262 @@ function MonitoredPositions({ positions }) {
   );
 }
 
+// ── Market Sentinel panel ─────────────────────────────────────────────────────
+
+function SentimentBadge({ sentiment }) {
+  const styles = {
+    bullish: "text-green-400 border-green-800 bg-green-950/30",
+    bearish: "text-red-400 border-red-800 bg-red-950/30",
+    neutral: "text-yellow-400 border-yellow-800 bg-yellow-950/30",
+  };
+  const s = (sentiment ?? "neutral").toLowerCase();
+  return (
+    <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border tracking-wide ${styles[s] ?? styles.neutral}`}>
+      {s.toUpperCase()}
+    </span>
+  );
+}
+
+function CandidateRow({ c }) {
+  return (
+    <div className="flex items-center gap-2 py-1 border-b border-gray-800/40">
+      <span className="font-mono text-xs text-gray-200 w-24 truncate">{c.symbol}</span>
+      <DirBadge direction={c.direction} />
+      <ConvictionBar conviction={c.conviction} />
+      <span className="text-[9px] text-gray-500 flex-1 truncate">{c.reason}</span>
+    </div>
+  );
+}
+
+function SentinelPanel({ sentinel, onRefresh }) {
+  const [refreshing, setRefreshing] = useState(false);
+
+  const refresh = async () => {
+    setRefreshing(true);
+    try {
+      await fetch("/api/sentinel/refresh", { method: "POST" });
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  if (!sentinel) {
+    return (
+      <div className="bg-gray-900 border border-gray-800 rounded p-4">
+        <div className="flex items-center justify-between mb-3">
+          <span className="text-[10px] text-gray-500 tracking-widest uppercase">Market Sentinel</span>
+          <button onClick={refresh} disabled={refreshing}
+            className="text-[9px] text-cyan-700 hover:text-cyan-400 transition-colors disabled:opacity-40">
+            {refreshing ? "SCANNING…" : "SCAN NOW"}
+          </button>
+        </div>
+        <div className="text-center text-gray-700 text-xs py-6">— waiting for first scan —</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded p-4">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] text-gray-500 tracking-widest uppercase">Market Sentinel</span>
+          <SentimentBadge sentiment={sentinel.overall_sentiment} />
+        </div>
+        <div className="flex items-center gap-3">
+          <span className="text-[9px] text-gray-600 font-mono">{fmtTs(sentinel.ts)}</span>
+          <button onClick={refresh} disabled={refreshing}
+            className="text-[9px] text-cyan-700 hover:text-cyan-400 transition-colors disabled:opacity-40">
+            {refreshing ? "…" : "REFRESH"}
+          </button>
+        </div>
+      </div>
+
+      {/* Regime commentary */}
+      {sentinel.regime_commentary && (
+        <p className="text-[10px] text-gray-400 italic mb-3">{sentinel.regime_commentary}</p>
+      )}
+
+      {/* Top candidates */}
+      <div className="mb-3">
+        <div className="text-[9px] text-gray-600 uppercase tracking-widest mb-1">Top Candidates</div>
+        {(sentinel.top_candidates ?? []).length === 0 ? (
+          <div className="text-[10px] text-gray-700">No high-conviction candidates</div>
+        ) : (
+          <div>
+            {sentinel.top_candidates.map((c, i) => <CandidateRow key={i} c={c} />)}
+          </div>
+        )}
+      </div>
+
+      {/* Themes + Risk flags */}
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <div className="text-[9px] text-gray-600 uppercase tracking-widest mb-1">Themes</div>
+          {(sentinel.themes ?? []).length === 0 ? (
+            <span className="text-[9px] text-gray-700">—</span>
+          ) : (
+            <ul className="space-y-0.5">
+              {sentinel.themes.map((t, i) => (
+                <li key={i} className="text-[9px] text-cyan-400 before:content-['•'] before:mr-1">{t}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div>
+          <div className="text-[9px] text-gray-600 uppercase tracking-widest mb-1">Risk Flags</div>
+          {(sentinel.risk_flags ?? []).length === 0 ? (
+            <span className="text-[9px] text-gray-700">None</span>
+          ) : (
+            <ul className="space-y-0.5">
+              {sentinel.risk_flags.map((f, i) => (
+                <li key={i} className="text-[9px] text-yellow-500 before:content-['!'] before:mr-1">{f}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-2 text-[8px] text-gray-700">model: {sentinel.model_used}  cost: ${sentinel.cost_usd?.toFixed(5)}</div>
+    </div>
+  );
+}
+
+// ── Position Guardian alerts ───────────────────────────────────────────────────
+
+const ACTION_STYLE = {
+  HOLD:          "text-green-400 border-green-900 bg-green-950/20",
+  TIGHTEN_STOP:  "text-yellow-400 border-yellow-900 bg-yellow-950/20",
+  PARTIAL_EXIT:  "text-orange-400 border-orange-900 bg-orange-950/20",
+  FULL_EXIT:     "text-red-400 border-red-900 bg-red-950/20",
+};
+
+function GuardianRow({ r }) {
+  const style = ACTION_STYLE[r.action] ?? ACTION_STYLE.HOLD;
+  return (
+    <div className="flex items-start gap-2 py-1.5 border-b border-gray-800/40">
+      <span className="font-mono text-xs text-gray-200 w-24 shrink-0 truncate">{r.symbol}</span>
+      <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded border tracking-wide shrink-0 ${style}`}>
+        {r.action.replace("_", " ")}
+      </span>
+      <span className="text-[9px] text-gray-500 flex-1 min-w-0 truncate">{r.reasoning}</span>
+      {r.auto_executed && (
+        <span className="text-[8px] font-bold text-red-500 shrink-0">AUTO</span>
+      )}
+      <span className="text-[9px] text-gray-700 shrink-0">{fmtTs(r.ts)}</span>
+    </div>
+  );
+}
+
+function GuardianAlerts({ guardian }) {
+  const reviews     = guardian?.recent_reviews ?? [];
+  const autoExecute = guardian?.auto_execute ?? false;
+  const nonHold     = reviews.filter((r) => r.action !== "HOLD");
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded p-4">
+      <div className="flex items-center justify-between mb-3">
+        <span className="text-[10px] text-gray-500 tracking-widest uppercase">Position Guardian</span>
+        <div className="flex items-center gap-2">
+          {autoExecute && (
+            <span className="text-[8px] font-bold text-red-400 border border-red-900 bg-red-950/20 px-1.5 py-0.5 rounded tracking-wide">
+              AUTO-EXECUTE ON
+            </span>
+          )}
+          <span className="text-[9px] text-gray-600">{reviews.length} reviews</span>
+        </div>
+      </div>
+
+      {nonHold.length === 0 ? (
+        <div className="text-center text-gray-700 text-xs py-4">— all positions HOLD —</div>
+      ) : (
+        <div className="max-h-48 overflow-y-auto">
+          {nonHold.slice().reverse().map((r, i) => <GuardianRow key={i} r={r} />)}
+        </div>
+      )}
+
+      {reviews.length > 0 && nonHold.length < reviews.length && (
+        <div className="text-[9px] text-gray-700 mt-2 text-center">
+          {reviews.length - nonHold.length} positions on HOLD
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Meta Advisor panel ────────────────────────────────────────────────────────
+
+function MetaAdvisorPanel({ metaAdvisor }) {
+  const [accepting, setAccepting] = useState({});
+  const [accepted,  setAccepted]  = useState({});
+
+  const suggestions  = metaAdvisor?.suggestions ?? [];
+  const summary      = metaAdvisor?.last_result_summary;
+
+  const accept = async (param) => {
+    setAccepting((p) => ({ ...p, [param]: true }));
+    try {
+      await fetch("/api/meta_advisor/accept", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ parameter: param }),
+      });
+      setAccepted((p) => ({ ...p, [param]: true }));
+    } finally {
+      setAccepting((p) => ({ ...p, [param]: false }));
+    }
+  };
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded p-4">
+      <div className="flex items-center justify-between mb-3">
+        <span className="text-[10px] text-gray-500 tracking-widest uppercase">MetaAdvisor</span>
+        <span className="text-[9px] text-gray-600">
+          {suggestions.length} suggestion{suggestions.length !== 1 ? "s" : ""}
+        </span>
+      </div>
+
+      {summary && (
+        <p className="text-[9px] text-gray-400 italic mb-3 border-l-2 border-cyan-800 pl-2">{summary}</p>
+      )}
+
+      {suggestions.length === 0 ? (
+        <div className="text-center text-gray-700 text-xs py-4">— no suggestions yet — (runs every 30 min) —</div>
+      ) : (
+        <div className="space-y-2">
+          {suggestions.map((s, i) => (
+            <div key={i} className="bg-gray-800/50 border border-gray-700 rounded p-2.5">
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <span className="text-xs font-mono text-gray-200 font-bold">{s.parameter}</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-[9px] text-gray-500">
+                    {String(s.current)} → <span className="text-cyan-400 font-bold">{String(s.suggested)}</span>
+                  </span>
+                  <span className="text-[8px] text-gray-600">conf: {s.confidence}</span>
+                </div>
+              </div>
+              <p className="text-[9px] text-gray-500 mb-2">{s.rationale}</p>
+              <button
+                onClick={() => accept(s.parameter)}
+                disabled={accepting[s.parameter] || accepted[s.parameter] || s.accepted}
+                className={[
+                  "text-[9px] font-bold px-2.5 py-1 rounded border transition-all",
+                  accepted[s.parameter] || s.accepted
+                    ? "border-green-800 bg-green-950/30 text-green-500 cursor-not-allowed"
+                    : accepting[s.parameter]
+                    ? "border-gray-700 text-gray-600 cursor-wait"
+                    : "border-cyan-800 bg-cyan-950/20 text-cyan-400 hover:bg-cyan-900/30",
+                ].join(" ")}
+              >
+                {accepted[s.parameter] || s.accepted ? "✓ ACCEPTED" : accepting[s.parameter] ? "…" : "ACCEPT"}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Legacy sub-panels (kept from original) ────────────────────────────────────
 
 function BrainVersionList({ versions }) {
@@ -496,6 +752,21 @@ export default function BrainAnalytics({ snapshot, pnlHistory }) {
       {/* ── Monitored positions ───────────────────────────────────────────── */}
       <div className="lg:col-span-2">
         <MonitoredPositions positions={brain.monitored_positions} />
+      </div>
+
+      {/* ── Market Sentinel ──────────────────────────────────────────────── */}
+      <div className="lg:col-span-2">
+        <SentinelPanel sentinel={snapshot?.sentinel} />
+      </div>
+
+      {/* ── Position Guardian ────────────────────────────────────────────── */}
+      <div>
+        <GuardianAlerts guardian={snapshot?.guardian} />
+      </div>
+
+      {/* ── MetaAdvisor ──────────────────────────────────────────────────── */}
+      <div>
+        <MetaAdvisorPanel metaAdvisor={snapshot?.meta_advisor} />
       </div>
 
       {/* ── Brain versions ────────────────────────────────────────────────── */}

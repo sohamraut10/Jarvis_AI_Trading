@@ -61,6 +61,12 @@ _LOT_SIZES: dict[str, int] = {
     "SILVER":       30,
     "NATURALGAS": 1250,
     "COPPER":     2500,
+    # NSE F&O index options/futures
+    "NIFTY":       50,
+    "BANKNIFTY":   15,
+    "FINNIFTY":    40,
+    "MIDCPNIFTY":  75,
+    "SENSEX":      10,
 }
 
 # Exchange mapping (for order routing)
@@ -70,6 +76,10 @@ _EXCHANGE: dict[str, Exchange] = {
     "CRUDEOIL":  Exchange.NSE, "GOLD":   Exchange.NSE,
     "SILVER":    Exchange.NSE, "NATURALGAS": Exchange.NSE,
     "COPPER":    Exchange.NSE,
+    # NSE F&O (options and futures on indices)
+    "NIFTY": Exchange.NFO, "BANKNIFTY": Exchange.NFO,
+    "FINNIFTY": Exchange.NFO, "MIDCPNIFTY": Exchange.NFO,
+    "SENSEX": Exchange.NFO,
 }
 
 _STRATEGY_ID = "ai_brain_layer5"

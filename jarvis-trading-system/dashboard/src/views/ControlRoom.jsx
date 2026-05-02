@@ -114,6 +114,8 @@ const DEFAULT_S = {
   hmm_states: 4, regime_lookback_bars: 200, sharpe_rank_window_days: 20,
   ws_port: 8765, log_level: "INFO",
   intent_log_path: "logs/intent.jsonl", pnl_db_path: "data/pnl.db",
+  anthropic_api_key: "", openai_api_key: "", google_api_key: "",
+  gemini_free_tier: false, guardian_auto_execute: false,
 };
 
 // ── Kill Switch panel ─────────────────────────────────────────────────────────
@@ -204,7 +206,6 @@ function ActiveWatchlist({ snapshot, onSearchOpen }) {
     return () => clearInterval(intervalRef.current);
   }, [loadWatchlist]);
 
-  // Merge live scanner data into watchlist entries
   const scanner = snapshot?.scanner ?? {};
   const enriched = watchlist.map((inst) => ({ ...inst, ...(scanner[inst.symbol] ?? {}) }));
 
@@ -219,7 +220,6 @@ function ActiveWatchlist({ snapshot, onSearchOpen }) {
 
   return (
     <div className="space-y-3">
-      {/* Add button */}
       <button
         onClick={onSearchOpen}
         className="w-full flex items-center justify-center gap-2 py-2 rounded border border-dashed
@@ -233,7 +233,6 @@ function ActiveWatchlist({ snapshot, onSearchOpen }) {
         SEARCH &amp; ADD INSTRUMENTS
       </button>
 
-      {/* Active instruments list */}
       {enriched.length === 0 ? (
         <p className="text-xs text-gray-600 text-center py-2">No instruments subscribed</p>
       ) : (
@@ -386,6 +385,91 @@ function PositionsPanel({ snapshot }) {
   );
 }
 
+// ── AI Brain panel ────────────────────────────────────────────────────────────
+
+function BudgetMini({ pct, costInr }) {
+  const color = pct >= 0.9 ? "bg-red-500" : pct >= 0.7 ? "bg-yellow-500" : "bg-cyan-500";
+  return (
+    <div>
+      <div className="flex justify-between text-[10px] text-gray-500 mb-1">
+        <span>Daily LLM budget</span>
+        <span className="font-mono tabular-nums">
+          ₹{(costInr ?? 0).toFixed(2)} / ₹200
+        </span>
+      </div>
+      <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
+        <div className={`h-full rounded-full transition-all ${color}`}
+          style={{ width: `${Math.min((pct ?? 0) * 100, 100)}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function AiBrainSection({ snapshot, guardianAutoExecute, onGuardianAutoExecuteChange }) {
+  const brain    = snapshot?.ai_brain ?? {};
+  const enabled  = brain.enabled ?? false;
+  const [toggling, setToggling] = useState(false);
+
+  const toggle = async () => {
+    setToggling(true);
+    await fetch("/api/ai/brain/toggle", { method: "POST" }).catch(() => {});
+    setTimeout(() => setToggling(false), 1000);
+  };
+
+  return (
+    <div className="space-y-4">
+      <Toggle
+        label="AI Brain enabled"
+        note="Activates market sentinel, position guardian, and meta-advisor."
+        checked={enabled}
+        onChange={toggle}
+        disabled={toggling}
+      />
+      <Toggle
+        label="Guardian auto-execute exits"
+        note="When ON, the Position Guardian will automatically close positions it deems high-risk."
+        checked={guardianAutoExecute}
+        onChange={onGuardianAutoExecuteChange}
+      />
+      <BudgetMini pct={brain.budget_pct_used} costInr={brain.daily_cost_inr} />
+      {brain.mode && (
+        <div className="text-[10px] text-gray-600">
+          Current model: <span className="text-gray-400 font-mono">{brain.mode}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Intelligence Auto-Select panel ────────────────────────────────────────────
+
+function IntelAutoSelectSection({ snapshot }) {
+  const autoSelect = snapshot?.intelligence?.auto_select ?? false;
+  const [toggling, setToggling] = useState(false);
+
+  const toggle = async () => {
+    setToggling(true);
+    await fetch("/api/intelligence/toggle_auto", { method: "POST" }).catch(() => {});
+    setTimeout(() => setToggling(false), 1000);
+  };
+
+  return (
+    <div className="space-y-3">
+      <Toggle
+        label="Intelligence auto-select"
+        note="JARVIS automatically picks the best strategy per symbol based on rolling Sharpe, regime compatibility, and market sentiment."
+        checked={autoSelect}
+        onChange={toggle}
+        disabled={toggling}
+      />
+      <p className="text-[9px] text-gray-700">
+        When OFF, strategies are selected manually from Strategy Arena.
+        When ON, the StrategySelector runs after every Market Sentinel cycle.
+      </p>
+    </div>
+  );
+}
+
 // ── Main ControlRoom ──────────────────────────────────────────────────────────
 
 export default function ControlRoom({
@@ -481,6 +565,20 @@ export default function ControlRoom({
           fmt={(v) => `${v}s`} />
       </Section>
 
+      {/* ── AI Brain ─────────────────────────────────────────────── */}
+      <Section title="AI Brain" badge={IMMEDIATE}>
+        <AiBrainSection
+          snapshot={snapshot}
+          guardianAutoExecute={s.guardian_auto_execute}
+          onGuardianAutoExecuteChange={update("guardian_auto_execute")}
+        />
+      </Section>
+
+      {/* ── Intelligence Auto-Select ─────────────────────────────── */}
+      <Section title="Intelligence Auto-Select" badge={IMMEDIATE}>
+        <IntelAutoSelectSection snapshot={snapshot} />
+      </Section>
+
       {/* ── Active Instruments ──────────────────────────────────── */}
       <Section title="Active Instruments" badge={IMMEDIATE}>
         <ActiveWatchlist snapshot={snapshot} onSearchOpen={onSearchOpen} />
@@ -489,6 +587,26 @@ export default function ControlRoom({
       {/* ── Strategies ───────────────────────────────────────────── */}
       <Section title="Strategies" badge={IMMEDIATE}>
         <StrategyPanel />
+      </Section>
+
+      {/* ── LLM API Keys ─────────────────────────────────────────── */}
+      <Section title="LLM API Keys" badge={RESTART}>
+        <TextField label="Anthropic API Key" value={s.anthropic_api_key}
+          onChange={update("anthropic_api_key")} type="password"
+          placeholder="sk-ant-…" />
+        <TextField label="OpenAI API Key" value={s.openai_api_key}
+          onChange={update("openai_api_key")} type="password"
+          placeholder="sk-…" />
+        <TextField label="Google AI API Key" value={s.google_api_key}
+          onChange={update("google_api_key")} type="password"
+          placeholder="AIza…" />
+        <Toggle label="Gemini free tier"
+          note="Skip cost recording for Gemini during paper-trading phase (1500 req/day on Flash)."
+          checked={s.gemini_free_tier} onChange={update("gemini_free_tier")} />
+        <p className="text-[9px] text-gray-700">
+          Keys stored in <code className="text-gray-500">data/settings.json</code> — never committed to git.
+          Displayed as bullets after save.
+        </p>
       </Section>
 
       {/* ── Broker credentials ───────────────────────────────────── */}

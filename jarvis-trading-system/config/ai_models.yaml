@@ -78,13 +78,26 @@ routing:
     fallback: claude-haiku-4-5-20251001
     throttle_override: true          # may exceed budget limit for exit safety
 
+  sentinel:
+    primary: gemini-2.5-flash
+    fallback: claude-haiku-4-5-20251001
+
+  guardian:
+    primary: gemini-2.5-flash
+    fallback: claude-haiku-4-5-20251001
+    throttle_override: true          # position safety overrides budget guard
+
+  meta_advisor:
+    primary: claude-sonnet-4-6
+    fallback: gemini-2.5-flash
+
 
 # ── Gemini context caching (CachedContent API) ────────────────────────────────
 # System prompts are cached for steps that call the same model repeatedly.
 # Only steps listed in enabled_steps participate; decide is excluded.
 
 gemini_cache:
-  enabled_steps: [scan, shortlist, monitor]
+  enabled_steps: [scan, shortlist, monitor, sentinel, guardian]
   ttl_seconds: 300                   # 5-minute cache TTL
 
 

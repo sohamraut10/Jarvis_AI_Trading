@@ -42,6 +42,10 @@ from ai_brain.analyst import Analyst
 from ai_brain.decision_engine import DecisionEngine
 from ai_brain.trade_monitor import TradeMonitor
 from ai_brain.action_executor import ActionExecutor
+from ai_brain.market_sentinel import MarketSentinel
+from ai_brain.position_guardian import PositionGuardian
+from ai_brain.meta_advisor import MetaAdvisor
+from ai_brain.strategy_selector import StrategySelector
 from strategies.momentum.orb_breakout import ORBBreakout
 from strategies.momentum.rsi_momentum import RSIMomentum
 from strategies.momentum.vwap_breakout import VWAPBreakout
@@ -237,6 +241,21 @@ class JarvisEngine:
         self._action_executor  = ActionExecutor(self._trade_monitor)
         self._ai_decisions: deque[dict] = deque(maxlen=50)
         self._ai_brain_enabled = True
+        # ── Bloomberg-level components ────────────────────────────────────────
+        self._sentinel = MarketSentinel(self._router, self._cost_throttle)
+        self._guardian = PositionGuardian(
+            self._router, self._cost_throttle,
+            close_position_fn=self._close_position,
+            auto_execute=False,
+        )
+        self._meta_advisor = MetaAdvisor(
+            self._router, self._cost_throttle,
+            apply_tweak_fn=self._apply_tweak,
+        )
+        self._strategy_selector = StrategySelector(
+            list(self._strategies.keys()),
+            window_days=20,
+        )
 
     async def start(self) -> None:
         await self._pnl_tracker.init()
@@ -257,6 +276,9 @@ class JarvisEngine:
         self._tasks.append(asyncio.create_task(self._heartbeat_loop()))
         self._tasks.append(asyncio.create_task(self._intelligence_loop()))
         self._tasks.append(asyncio.create_task(self._ai_brain_loop()))
+        self._tasks.append(asyncio.create_task(self._sentinel_loop()))
+        self._tasks.append(asyncio.create_task(self._guardian_loop()))
+        self._tasks.append(asyncio.create_task(self._meta_advisor_loop()))
 
     async def stop(self) -> None:
         self._running = False
@@ -418,6 +440,122 @@ class JarvisEngine:
                     )
             except Exception as exc:
                 logger.warning("AI brain decision error (%s): %s", entry.symbol, exc)
+
+    # ── Bloomberg loops ───────────────────────────────────────────────────────
+
+    async def _sentinel_loop(self) -> None:
+        """Market sentinel: runs every 5 min after initial warmup."""
+        await asyncio.sleep(AI_BRAIN_WARMUP_S)
+        while self._running:
+            try:
+                if self._ai_brain_enabled:
+                    await self._sentinel.run_once(self.snapshot())
+                    # After sentinel, update strategy selector stats
+                    self._update_strategy_selector()
+            except Exception as exc:
+                logger.error("sentinel loop error: %s", exc)
+            await asyncio.sleep(300)
+
+    async def _guardian_loop(self) -> None:
+        """Position guardian: reviews open positions every 60s."""
+        await asyncio.sleep(AI_BRAIN_WARMUP_S + 30)
+        while self._running:
+            try:
+                if self._ai_brain_enabled:
+                    snap = self.snapshot()
+                    positions  = (snap.get("broker") or {}).get("open_positions") or {}
+                    kill_active = (snap.get("broker") or {}).get("kill_switch_active", False)
+                    sentiment  = ""
+                    if self._sentinel.last_result:
+                        sentiment = self._sentinel.last_result.overall_sentiment
+                    await self._guardian.review_all(positions, snap, sentiment, kill_active)
+            except Exception as exc:
+                logger.error("guardian loop error: %s", exc)
+            await asyncio.sleep(60)
+
+    async def _meta_advisor_loop(self) -> None:
+        """Meta-advisor: self-improvement suggestions every 30 min."""
+        await asyncio.sleep(1800)   # first run after 30 min
+        while self._running:
+            try:
+                if self._ai_brain_enabled:
+                    await self._meta_advisor.run_once(self._build_performance_data())
+            except Exception as exc:
+                logger.error("meta_advisor loop error: %s", exc)
+            await asyncio.sleep(1800)
+
+    def _update_strategy_selector(self) -> None:
+        """Feed latest Sharpe/win_rate stats into StrategySelector."""
+        stats: dict = {}
+        for sid, strat in self._strategies.items():
+            s = strat.get_stats()
+            stats[sid] = {
+                "sharpe":   strat.get_sharpe(),
+                "win_rate": s.win_rate,
+            }
+        self._strategy_selector.update_stats(stats)
+
+        if self._sentinel.last_result:
+            sent = self._sentinel.last_result
+            for sym in list(self._close_history.keys()):
+                self._strategy_selector.select(
+                    sym, self._regime,
+                    sent.overall_sentiment,
+                    sent.candidate_symbols,
+                )
+
+    def _build_performance_data(self) -> dict:
+        return {
+            "recent_decisions":   list(self._ai_decisions),
+            "strategy_win_rates": {
+                sid: strat.get_stats().win_rate
+                for sid, strat in self._strategies.items()
+            },
+            "daily_pnl":         self._broker._daily_pnl if hasattr(self._broker, "_daily_pnl") else 0,
+            "total_trades":      sum(
+                strat.get_stats().sample_size or 0 for strat in self._strategies.values()
+            ),
+            "win_rate_overall":  0.5,  # simplified; real impl queries pnl_tracker
+            "kelly_fraction":    self._kelly_sizer._kelly_fraction,
+            "kill_switch_pct":   getattr(self._risk_manager, "_kill_switch_pct", 0.03),
+            "sharpe_rank_window_days": 20,
+            "regime_lookback_bars":    200,
+            "hmm_states":        4,
+            "guardian_auto_execute": self._guardian.auto_execute,
+            "regime":            str(self._regime),
+        }
+
+    async def _close_position(self, symbol: str) -> None:
+        """Callback for PositionGuardian auto-execute."""
+        pos_map = await self._broker.get_positions()
+        pos = pos_map.get(symbol)
+        if pos and pos.qty != 0:
+            from core.broker.base_broker import Order, OrderSide, OrderType, ProductType
+            side  = OrderSide.SELL if pos.qty > 0 else OrderSide.BUY
+            order = Order(
+                symbol=symbol, side=side, order_type=OrderType.MARKET,
+                qty=abs(pos.qty), product=ProductType.INTRADAY,
+                strategy_id="GUARDIAN_AUTO",
+            )
+            await self._broker.place_order(order)
+            logger.warning("Guardian auto-closed %s  qty=%d", symbol, abs(pos.qty))
+
+    async def _apply_tweak(self, parameter: str, value) -> None:
+        """Callback for MetaAdvisor to apply accepted tweaks live."""
+        if parameter == "kelly_fraction":
+            self._kelly_sizer._kelly_fraction = float(value)
+        elif parameter == "guardian_auto_execute":
+            self._guardian.auto_execute = bool(value)
+        logger.info("MetaAdvisor tweak applied: %s = %s", parameter, value)
+        # Persist to settings file
+        existing: dict = {}
+        if SETTINGS_FILE.exists():
+            try:
+                existing = json.loads(SETTINGS_FILE.read_text())
+            except Exception:
+                pass
+        existing[parameter] = value
+        SETTINGS_FILE.write_text(json.dumps(existing, indent=2))
 
     async def _on_tick(self, symbol: str, ltp: float, volume: float) -> None:
         if not self._running:
@@ -612,6 +750,22 @@ class JarvisEngine:
                 "decisions":           list(self._ai_decisions)[:10],
                 "monitored_positions": self._trade_monitor.snapshot(),
             },
+            "sentinel": (
+                self._sentinel.last_result.to_dict()
+                if self._sentinel.last_result else None
+            ),
+            "guardian": {
+                "recent_reviews": self._guardian.recent_reviews(10),
+                "auto_execute":   self._guardian.auto_execute,
+            },
+            "meta_advisor": {
+                "suggestions":         self._meta_advisor.last_suggestions(),
+                "last_result_summary": (
+                    self._meta_advisor.last_result.performance_summary
+                    if self._meta_advisor.last_result else None
+                ),
+            },
+            "strategy_selections": self._strategy_selector.all_selections(),
         }
 
     async def manual_kill(self) -> None:
@@ -746,6 +900,9 @@ async def _route(method: str, path: str, query: dict, body: dict) -> tuple[int, 
             kf  = float(merged.get("kelly_fraction", 0.5))
             _engine._broker._kill_switch_amount = ic * ksp
             _engine._kelly_sizer._kelly_fraction = kf
+            # Apply guardian_auto_execute immediately if changed
+            if "guardian_auto_execute" in body:
+                _engine._guardian.auto_execute = bool(merged.get("guardian_auto_execute", False))
         return 200, {"status": "saved", "restart_required": restart_required}
     if path == "/api/kill":
         if _engine:
@@ -907,9 +1064,61 @@ async def _route(method: str, path: str, query: dict, body: dict) -> tuple[int, 
 
     if path == "/api/ai/brain/toggle" and method == "POST":
         if _engine:
-            _engine._ai_brain_enabled = bool(body.get("enabled", True))
+            _engine._ai_brain_enabled = not _engine._ai_brain_enabled
             logger.info("AI brain %s by user", "ENABLED" if _engine._ai_brain_enabled else "DISABLED")
         return 200, {"enabled": _engine._ai_brain_enabled if _engine else False}
+
+    if path == "/api/sentinel":
+        if not _engine:
+            return 200, {"sentinel": None}
+        result = _engine._sentinel.last_result
+        return 200, {"sentinel": result.to_dict() if result else None}
+
+    if path == "/api/sentinel/refresh" and method == "POST":
+        if _engine and _engine._ai_brain_enabled:
+            result = await _engine._sentinel.run_once(_engine.snapshot())
+            return 200, result.to_dict()
+        return 200, {"error": "AI brain disabled"}
+
+    if path == "/api/guardian":
+        if not _engine:
+            return 200, {"reviews": [], "auto_execute": False}
+        return 200, {
+            "reviews":      _engine._guardian.recent_reviews(20),
+            "auto_execute": _engine._guardian.auto_execute,
+        }
+
+    if path == "/api/guardian/auto_execute" and method == "POST":
+        if _engine:
+            val = bool(body.get("enabled", False))
+            _engine._guardian.auto_execute = val
+            logger.info("Guardian auto-execute %s by user", "ON" if val else "OFF")
+        return 200, {"auto_execute": _engine._guardian.auto_execute if _engine else False}
+
+    if path == "/api/meta_advisor/suggestions":
+        if not _engine:
+            return 200, {"suggestions": []}
+        return 200, {
+            "suggestions": _engine._meta_advisor.last_suggestions(),
+            "summary":     (
+                _engine._meta_advisor.last_result.performance_summary
+                if _engine._meta_advisor.last_result else None
+            ),
+        }
+
+    if path == "/api/meta_advisor/accept" and method == "POST":
+        param = str(body.get("parameter", "")).strip()
+        if not param:
+            return 400, {"error": "parameter required"}
+        if _engine:
+            ok = await _engine._meta_advisor.accept_suggestion(param)
+            return 200, {"accepted": ok, "parameter": param}
+        return 200, {"accepted": False}
+
+    if path == "/api/strategy_selections":
+        if not _engine:
+            return 200, {"selections": {}}
+        return 200, {"selections": _engine._strategy_selector.all_selections()}
 
     if path == "/api/instruments/scrip_status":
         from core.feeds.dhan_instruments import get_scrip_master
