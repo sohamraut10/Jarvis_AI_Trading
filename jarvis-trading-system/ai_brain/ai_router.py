@@ -1,8 +1,16 @@
 """
 AIRouter — Layer 5 primary inference gateway.
 
-Supports Claude (Anthropic), GPT-4o (OpenAI), and Gemini (Google).
-Routing per pipeline step is driven by config/ai_models.yaml.
+Supports Claude via Anthropic direct API or Amazon Bedrock, GPT-4o (OpenAI),
+and Gemini (Google).  Routing per pipeline step is driven by config/ai_models.yaml.
+
+Amazon Bedrock
+──────────────
+  Set bedrock.enabled: true in ai_models.yaml (or USE_BEDROCK=true env var) to
+  route all Claude calls through AWS Bedrock instead of the Anthropic direct API.
+  Requires: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION.
+  Uses anthropic.AsyncAnthropicBedrock — same message interface, different client.
+  Model IDs are mapped via bedrock.model_ids in ai_models.yaml.
 
 Call modes
 ──────────
@@ -191,17 +199,41 @@ class AIRouter:
         free_tier_var         = (cfg.get("budget") or {}).get("free_tier_env_var", "GEMINI_FREE_TIER")
         self._gemini_free     = os.environ.get(free_tier_var, "").lower() == "true"
 
+        # ── Amazon Bedrock ────────────────────────────────────────────────────
+        bedrock_cfg           = cfg.get("bedrock") or {}
+        self._use_bedrock: bool = (
+            bedrock_cfg.get("enabled", False)
+            or os.environ.get("USE_BEDROCK", "").lower() == "true"
+        )
+        self._bedrock_region: str = (
+            os.environ.get("AWS_DEFAULT_REGION")
+            or bedrock_cfg.get("region", "us-east-1")
+        )
+        # Logical model name → Bedrock cross-region inference profile ID
+        self._bedrock_model_map: dict[str, str] = {
+            "claude-opus-4-7":           "us.anthropic.claude-opus-4-5-20250514-v1:0",
+            "claude-sonnet-4-6":         "us.anthropic.claude-sonnet-4-5-20250514-v1:0",
+            "claude-haiku-4-5-20251001": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            **(bedrock_cfg.get("model_ids") or {}),
+        }
+
         self._lock            = asyncio.Lock()
         self._call_log: list[CallRecord] = []
         self._daily_cost: dict[date, float] = {}
 
         # Lazy SDK clients
         self._anthropic_client = None
+        self._bedrock_client   = None   # AsyncAnthropicBedrock
         self._openai_client    = None
         self._gemini_client    = None   # google.generativeai module handle
 
         # Gemini context cache: (model, prompt_hash) → (CachedContent, expires_at)
         self._gemini_prompt_cache: dict[tuple[str, str], tuple[Any, float]] = {}
+
+        if self._use_bedrock:
+            logger.info(
+                "AIRouter: Bedrock mode ENABLED  region=%s", self._bedrock_region
+            )
 
     # ── Public interface ──────────────────────────────────────────────────────
 
@@ -235,6 +267,10 @@ class AIRouter:
     @property
     def daily_cost_usd(self) -> float:
         return self._daily_cost.get(date.today(), 0.0)
+
+    @property
+    def use_bedrock(self) -> bool:
+        return self._use_bedrock
 
     @property
     def call_log(self) -> list[CallRecord]:
@@ -345,10 +381,60 @@ class AIRouter:
         if model.startswith("gemini"):
             return await self._call_gemini(prompt, model, mode, step)
         if model.startswith("claude"):
+            if self._use_bedrock:
+                return await self._call_bedrock(prompt, model, mode, step)
             return await self._call_claude(prompt, model, mode, step)
         return await self._call_gpt(prompt, model, mode, step)
 
-    # ── Claude ────────────────────────────────────────────────────────────────
+    # ── Amazon Bedrock (Claude via AWS) ──────────────────────────────────────
+
+    async def _call_bedrock(
+        self, prompt: str, model: str, mode: str, step: str
+    ) -> RouterResponse:
+        """Call Claude through AWS Bedrock using AsyncAnthropicBedrock."""
+        bedrock_id = self._bedrock_model_map.get(model, model)
+        client = self._get_bedrock_client()
+        t0 = time.perf_counter()
+        try:
+            msg = await asyncio.wait_for(
+                client.messages.create(
+                    model=bedrock_id,
+                    max_tokens=self.max_tokens,
+                    system=self.system_prompt,
+                    messages=[{"role": "user", "content": prompt}],
+                ),
+                timeout=self._hard_timeout,
+            )
+            latency_ms = (time.perf_counter() - t0) * 1000
+            text       = msg.content[0].text
+            tok_in     = msg.usage.input_tokens
+            tok_out    = msg.usage.output_tokens
+            cost       = _calc_cost(self._pricing, model, tok_in, tok_out)
+
+            await self._record(CallRecord(
+                ts=time.time(), model=f"bedrock/{bedrock_id}",
+                tokens_in=tok_in, tokens_out=tok_out, tokens_cached=0,
+                cost_usd=cost, latency_ms=latency_ms,
+                mode=mode, step=step, success=True,
+            ))
+            return RouterResponse(
+                response=text, model_used=f"bedrock/{bedrock_id}",
+                latency_ms=latency_ms, cost_usd=cost,
+                consensus=False, direction=self._extract_direction(text),
+                tokens_in=tok_in, tokens_out=tok_out,
+                raw={"model": bedrock_id, "text": text, "via": "bedrock"},
+            )
+        except Exception as exc:
+            latency_ms = (time.perf_counter() - t0) * 1000
+            await self._record(CallRecord(
+                ts=time.time(), model=f"bedrock/{bedrock_id}",
+                tokens_in=0, tokens_out=0, tokens_cached=0, cost_usd=0.0,
+                latency_ms=latency_ms, mode=mode, step=step,
+                success=False, error=str(exc),
+            ))
+            raise
+
+    # ── Claude (Anthropic direct API) ────────────────────────────────────────
 
     async def _call_claude(
         self, prompt: str, model: str, mode: str, step: str
@@ -654,6 +740,22 @@ class AIRouter:
                 raise EnvironmentError("ANTHROPIC_API_KEY not set. Export it or add to .env.")
             self._anthropic_client = anthropic.AsyncAnthropic(api_key=api_key)
         return self._anthropic_client
+
+    def _get_bedrock_client(self):
+        if self._bedrock_client is None:
+            from anthropic import AsyncAnthropicBedrock  # noqa: PLC0415
+            access_key = os.environ.get("AWS_ACCESS_KEY_ID", "")
+            secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
+            if not access_key or not secret_key:
+                raise EnvironmentError(
+                    "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be set for Bedrock mode."
+                )
+            self._bedrock_client = AsyncAnthropicBedrock(
+                aws_access_key=access_key,
+                aws_secret_key=secret_key,
+                aws_region=self._bedrock_region,
+            )
+        return self._bedrock_client
 
     def _get_openai_client(self):
         if self._openai_client is None:

@@ -116,6 +116,7 @@ const DEFAULT_S = {
   intent_log_path: "logs/intent.jsonl", pnl_db_path: "data/pnl.db",
   anthropic_api_key: "", openai_api_key: "", google_api_key: "",
   gemini_free_tier: false, guardian_auto_execute: false,
+  use_bedrock: false, aws_access_key_id: "", aws_secret_access_key: "", aws_region: "us-east-1",
 };
 
 // ── Kill Switch panel ─────────────────────────────────────────────────────────
@@ -432,11 +433,16 @@ function AiBrainSection({ snapshot, guardianAutoExecute, onGuardianAutoExecuteCh
         onChange={onGuardianAutoExecuteChange}
       />
       <BudgetMini pct={brain.budget_pct_used} costInr={brain.daily_cost_inr} />
-      {brain.mode && (
-        <div className="text-[10px] text-gray-600">
-          Current model: <span className="text-gray-400 font-mono">{brain.mode}</span>
-        </div>
-      )}
+      <div className="flex items-center gap-3 text-[10px] text-gray-600">
+        {brain.mode && (
+          <span>throttle: <span className="text-gray-400 font-mono">{brain.mode}</span></span>
+        )}
+        {brain.use_bedrock != null && (
+          <span className={`font-bold tracking-widest ${brain.use_bedrock ? "text-orange-400" : "text-gray-600"}`}>
+            {brain.use_bedrock ? "⬡ BEDROCK" : "DIRECT API"}
+          </span>
+        )}
+      </div>
     </div>
   );
 }
@@ -589,22 +595,67 @@ export default function ControlRoom({
         <StrategyPanel />
       </Section>
 
-      {/* ── LLM API Keys ─────────────────────────────────────────── */}
-      <Section title="LLM API Keys" badge={RESTART}>
-        <TextField label="Anthropic API Key" value={s.anthropic_api_key}
-          onChange={update("anthropic_api_key")} type="password"
-          placeholder="sk-ant-…" />
-        <TextField label="OpenAI API Key" value={s.openai_api_key}
-          onChange={update("openai_api_key")} type="password"
-          placeholder="sk-…" />
-        <TextField label="Google AI API Key" value={s.google_api_key}
-          onChange={update("google_api_key")} type="password"
-          placeholder="AIza…" />
-        <Toggle label="Gemini free tier"
-          note="Skip cost recording for Gemini during paper-trading phase (1500 req/day on Flash)."
-          checked={s.gemini_free_tier} onChange={update("gemini_free_tier")} />
+      {/* ── Cloud Provider ────────────────────────────────────────── */}
+      <Section title="Cloud Provider" badge={RESTART} className="lg:col-span-2">
+        <Toggle
+          label="Use Amazon Bedrock"
+          note="Route all Claude calls through AWS Bedrock instead of Anthropic direct API. Requires AWS credentials below."
+          checked={s.use_bedrock}
+          onChange={update("use_bedrock")}
+        />
+
+        {s.use_bedrock ? (
+          <>
+            <div className="border-t border-gray-800 pt-3 space-y-3">
+              <div className="text-[9px] text-cyan-700 font-bold tracking-widest uppercase mb-2">
+                AWS Bedrock Credentials
+              </div>
+              <TextField label="AWS Access Key ID" value={s.aws_access_key_id}
+                onChange={update("aws_access_key_id")} type="password"
+                placeholder="AKIA…" />
+              <TextField label="AWS Secret Access Key" value={s.aws_secret_access_key}
+                onChange={update("aws_secret_access_key")} type="password"
+                placeholder="wJalrX…" />
+              <SelectField label="AWS Region" value={s.aws_region}
+                onChange={update("aws_region")}
+                options={[
+                  { value: "us-east-1",      label: "us-east-1 (N. Virginia)" },
+                  { value: "us-west-2",      label: "us-west-2 (Oregon)" },
+                  { value: "eu-west-1",      label: "eu-west-1 (Ireland)" },
+                  { value: "ap-south-1",     label: "ap-south-1 (Mumbai)" },
+                  { value: "ap-southeast-1", label: "ap-southeast-1 (Singapore)" },
+                  { value: "ap-northeast-1", label: "ap-northeast-1 (Tokyo)" },
+                ]} />
+              <p className="text-[9px] text-gray-700">
+                Bedrock model IDs are configured in <code className="text-gray-500">config/ai_models.yaml</code> under <code className="text-gray-500">bedrock.model_ids</code>.
+                Default: Claude Sonnet 4.5 cross-region inference profile.
+              </p>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="border-t border-gray-800 pt-3 space-y-3">
+              <div className="text-[9px] text-gray-600 font-bold tracking-widest uppercase mb-2">
+                Anthropic Direct API
+              </div>
+              <TextField label="Anthropic API Key" value={s.anthropic_api_key}
+                onChange={update("anthropic_api_key")} type="password"
+                placeholder="sk-ant-…" />
+              <TextField label="OpenAI API Key" value={s.openai_api_key}
+                onChange={update("openai_api_key")} type="password"
+                placeholder="sk-…" />
+              <TextField label="Google AI API Key" value={s.google_api_key}
+                onChange={update("google_api_key")} type="password"
+                placeholder="AIza…" />
+              <Toggle label="Gemini free tier"
+                note="Skip cost recording for Gemini during paper-trading phase (1500 req/day on Flash)."
+                checked={s.gemini_free_tier} onChange={update("gemini_free_tier")} />
+            </div>
+          </>
+        )}
+
         <p className="text-[9px] text-gray-700">
-          Keys stored in <code className="text-gray-500">data/settings.json</code> — never committed to git.
+          Credentials stored in <code className="text-gray-500">data/settings.json</code> — never committed to git.
           Displayed as bullets after save.
         </p>
       </Section>

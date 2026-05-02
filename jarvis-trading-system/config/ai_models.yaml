@@ -107,6 +107,25 @@ latency:
   hard_timeout: 10.0                 # total timeout before rules-only fallback
 
 
+# ── Amazon Bedrock ────────────────────────────────────────────────────────────
+# When enabled, all Claude calls are routed through AWS Bedrock instead of
+# the Anthropic direct API.  Gemini and GPT routes are unaffected.
+# Set USE_BEDROCK=true in .env or toggle via the dashboard to activate.
+#
+# Credentials: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION
+# (or store in data/settings.json via the Command Centre → Cloud Provider panel)
+
+bedrock:
+  enabled: false
+  region: us-east-1
+  # Logical model name → Bedrock cross-region inference profile ID.
+  # Update these if AWS releases newer Claude versions in your region.
+  model_ids:
+    claude-opus-4-7:           us.anthropic.claude-opus-4-5-20250514-v1:0
+    claude-sonnet-4-6:         us.anthropic.claude-sonnet-4-5-20250514-v1:0
+    claude-haiku-4-5-20251001: us.anthropic.claude-haiku-4-5-20251001-v1:0
+
+
 # ── Budget ────────────────────────────────────────────────────────────────────
 budget:
   daily_inr: 200

@@ -744,6 +744,7 @@ class JarvisEngine:
             "ai_brain": {
                 "enabled":             self._ai_brain_enabled,
                 "mode":                self._cost_throttle.mode,
+                "use_bedrock":         self._router.use_bedrock,
                 "daily_cost_usd":      round(self._router.daily_cost_usd, 6),
                 "daily_cost_inr":      round(self._router.daily_cost_usd * 84.0, 2),
                 "budget_pct_used":     self._cost_throttle.snapshot().pct_used,
@@ -869,9 +870,13 @@ async def _route(method: str, path: str, query: dict, body: dict) -> tuple[int, 
                 raw = json.loads(SETTINGS_FILE.read_text())
             except Exception:
                 pass
-        _SECRET_KEYS = ("dhan_access_token", "anthropic_api_key", "openai_api_key", "google_api_key")
+        _SECRET_KEYS = (
+            "dhan_access_token", "anthropic_api_key", "openai_api_key",
+            "google_api_key", "aws_secret_access_key",
+        )
         return 200, {**raw,
                      "dhan_client_id":    _mask(raw.get("dhan_client_id", "")),
+                     "aws_access_key_id": _mask(raw.get("aws_access_key_id", "")),
                      **{k: "•" * 8 if raw.get(k) else "" for k in _SECRET_KEYS}}
     if path == "/api/settings" and method == "POST":
         SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -883,8 +888,11 @@ async def _route(method: str, path: str, query: dict, body: dict) -> tuple[int, 
                 pass
         merged = {**existing, **body}
         # Don't overwrite stored secrets with masked placeholder values
-        _SECRET_KEYS = ("dhan_client_id", "dhan_access_token",
-                        "anthropic_api_key", "openai_api_key", "google_api_key")
+        _SECRET_KEYS = (
+            "dhan_client_id", "dhan_access_token",
+            "anthropic_api_key", "openai_api_key", "google_api_key",
+            "aws_access_key_id", "aws_secret_access_key",
+        )
         for k in _SECRET_KEYS:
             if "•" in str(merged.get(k, "")):
                 merged[k] = existing.get(k, "")
@@ -892,7 +900,8 @@ async def _route(method: str, path: str, query: dict, body: dict) -> tuple[int, 
         _RESTART_KEYS = {"initial_capital", "paper_mode", "hmm_states", "ws_port",
                          "pnl_db_path", "intent_log_path",
                          "anthropic_api_key", "openai_api_key", "google_api_key",
-                         "gemini_free_tier"}
+                         "gemini_free_tier", "use_bedrock",
+                         "aws_access_key_id", "aws_secret_access_key", "aws_region"}
         restart_required = bool(_RESTART_KEYS & set(body.keys()))
         if _engine:
             ic  = float(merged.get("initial_capital", 10000))
@@ -1241,12 +1250,15 @@ async def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    # Inject settings-stored LLM API keys into env vars (only if not already set externally)
+    # Inject settings-stored credentials into env vars (only if not already set externally)
     import os
     for env_var, cfg_key in [
-        ("ANTHROPIC_API_KEY", "anthropic_api_key"),
-        ("OPENAI_API_KEY",    "openai_api_key"),
-        ("GOOGLE_API_KEY",    "google_api_key"),
+        ("ANTHROPIC_API_KEY",    "anthropic_api_key"),
+        ("OPENAI_API_KEY",       "openai_api_key"),
+        ("GOOGLE_API_KEY",       "google_api_key"),
+        ("AWS_ACCESS_KEY_ID",    "aws_access_key_id"),
+        ("AWS_SECRET_ACCESS_KEY","aws_secret_access_key"),
+        ("AWS_DEFAULT_REGION",   "aws_region"),
     ]:
         val = cfg.get(cfg_key, "").strip()
         if val and not os.environ.get(env_var):
@@ -1254,6 +1266,8 @@ async def main() -> None:
             logger.info("Loaded %s from settings.json", env_var)
     if cfg.get("gemini_free_tier"):
         os.environ.setdefault("GEMINI_FREE_TIER", "true")
+    if cfg.get("use_bedrock"):
+        os.environ.setdefault("USE_BEDROCK", "true")
 
     # Override symbol lists from settings if saved via frontend
     if "watch_symbols" in cfg and cfg["watch_symbols"]:
