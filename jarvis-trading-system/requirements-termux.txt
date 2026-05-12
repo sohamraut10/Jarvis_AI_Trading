@@ -3,11 +3,12 @@
 #
 # All packages here are pure Python or have pre-built wheels.
 # No FastAPI, no pydantic, no orjson, no pydantic-core.
+# No httpx — replaced with requests throughout for Termux compatibility.
 
 # dhanhq installed separately to skip pandas (not needed for market feed):
 #   pip install dhanhq==2.0.1 --no-deps && pip install websocket-client requests
 websocket-client>=1.6  # dhanhq market feed dependency (pure Python)
-requests>=2.28         # dhanhq REST dependency     (pure Python)
+requests>=2.28         # dhanhq REST dependency + NSE client (pure Python)
 websockets==12.0       # WebSocket server (pure Python)
 aiosqlite==0.20.0      # async SQLite  (pure Python)
 apscheduler==3.10.4    # scheduler     (pure Python)
@@ -16,3 +17,11 @@ structlog==24.1.0      # logging       (pure Python)
 python-dotenv==1.0.1   # .env loader   (pure Python)
 optuna==3.6.1          # Bayesian opt  (pure Python)
 sqlalchemy==2.0.30     # ORM           (pure Python core)
+yfinance>=0.2.40       # Forex fallback feed (pure Python)
+pyyaml>=6.0.1          # config files  (pure Python)
+
+# ── LLM inference (AI Brain — install only if you have API keys) ──────────────
+# These are optional: the system degrades gracefully without them.
+# anthropic>=0.28.0
+# openai>=1.30.0
+# google-generativeai>=0.8.0

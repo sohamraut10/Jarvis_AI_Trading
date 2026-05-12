@@ -39,20 +39,20 @@ class DhanScanner:
     def __init__(self, client_id: str, access_token: str) -> None:
         self._cid = client_id
         self._tok = access_token
-        self._session = None   # httpx.Client, lazy-init
+        self._session = None   # requests.Session, lazy-init
 
     def _client(self):
         if self._session is None:
-            import httpx
-            self._session = httpx.Client(
-                headers={
-                    "client-id":    self._cid,
-                    "access-token": self._tok,
-                    "Content-Type": "application/json",
-                    "Accept":       "application/json",
-                },
-                timeout=_TIMEOUT,
-            )
+            import requests as _requests
+            s = _requests.Session()
+            s.headers.update({
+                "client-id":    self._cid,
+                "access-token": self._tok,
+                "Content-Type": "application/json",
+                "Accept":       "application/json",
+            })
+            s.timeout = _TIMEOUT
+            self._session = s
         return self._session
 
     # ── Public ────────────────────────────────────────────────────────────────
@@ -195,10 +195,10 @@ class DhanScanner:
             if not int_batch:
                 continue
             try:
-                import json as _json
                 resp = self._client().post(
                     f"{_DHAN_API}/v2/marketfeed/quote",
-                    content=_json.dumps({segment: int_batch}),
+                    json={segment: int_batch},
+                    timeout=_TIMEOUT,
                 )
                 if resp.status_code == 200:
                     data = resp.json()
