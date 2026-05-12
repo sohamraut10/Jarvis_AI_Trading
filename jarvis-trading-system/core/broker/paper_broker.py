@@ -66,6 +66,12 @@ class PaperBroker(BaseBroker):
         # Resting orders bucketed by symbol for O(1) fill checks
         self._resting: dict[str, list[Order]] = defaultdict(list)
 
+        # Entry context per symbol → produces complete trade record on close
+        self._entry_info: dict[str, dict] = {}
+
+        # Optional callback — called with trade dict each time a position fully closes
+        self.on_trade_closed: Optional[callable] = None
+
         self._lock = asyncio.Lock()
 
     # ── Internal helpers ───────────────────────────────────────────────────────
@@ -109,6 +115,7 @@ class PaperBroker(BaseBroker):
         # ── Update position ────────────────────────────────────────────────────
         pos = self._positions.get(order.symbol)
         signed_qty = qty if order.side == OrderSide.BUY else -qty
+        closed_trade: Optional[dict] = None
 
         if pos is None:
             pos = Position(
@@ -118,6 +125,15 @@ class PaperBroker(BaseBroker):
                 product=order.product,
             )
             self._positions[order.symbol] = pos
+            # Record entry context for later trade-close record
+            self._entry_info[order.symbol] = {
+                "time":        datetime.utcnow(),
+                "strategy_id": order.strategy_id or "unknown",
+                "price":       fill_price,
+                "sl":          order.trigger_price,
+                "tp":          None,
+                "confidence":  None,
+            }
         else:
             opening = (pos.qty == 0) or (pos.qty > 0 and order.side == OrderSide.BUY) or \
                       (pos.qty < 0 and order.side == OrderSide.SELL)
@@ -129,8 +145,21 @@ class PaperBroker(BaseBroker):
                     (pos.avg_price * abs(pos.qty) + fill_price * qty) / abs(new_qty)
                 )
                 pos.qty = new_qty
+                if pos.qty != 0 and order.symbol not in self._entry_info:
+                    self._entry_info[order.symbol] = {
+                        "time":        datetime.utcnow(),
+                        "strategy_id": order.strategy_id or "unknown",
+                        "price":       pos.avg_price,
+                        "sl":          order.trigger_price,
+                        "tp":          None,
+                        "confidence":  None,
+                    }
             else:
                 # Closing or reversing
+                entry = self._entry_info.get(order.symbol, {})
+                entry_price_snap = entry.get("price", pos.avg_price)
+                entry_time_snap  = entry.get("time", datetime.utcnow())
+
                 close_qty = min(abs(pos.qty), qty)
                 if order.side == OrderSide.SELL:
                     realized = (fill_price - pos.avg_price) * close_qty
@@ -142,10 +171,35 @@ class PaperBroker(BaseBroker):
                 if pos.qty == 0:
                     pos.avg_price = 0.0
                     pos.unrealized_pnl = 0.0
+                    # Capture closed trade for journal
+                    side_str = "LONG" if order.side == OrderSide.SELL else "SHORT"
+                    closed_trade = {
+                        "strategy_id": entry.get("strategy_id", order.strategy_id or "unknown"),
+                        "symbol":      order.symbol,
+                        "side":        side_str,
+                        "qty":         close_qty,
+                        "entry_price": entry_price_snap,
+                        "exit_price":  fill_price,
+                        "pnl":         round(realized, 2),
+                        "entry_time":  entry_time_snap,
+                        "exit_time":   datetime.utcnow(),
+                        "sl":          entry.get("sl"),
+                        "tp":          entry.get("tp"),
+                        "confidence":  entry.get("confidence"),
+                    }
+                    self._entry_info.pop(order.symbol, None)
                 elif (pos.qty > 0 and order.side == OrderSide.SELL and qty > abs(pos.qty - signed_qty)) or \
                      (pos.qty < 0 and order.side == OrderSide.BUY):
-                    # Reversed — reset avg to fill price
+                    # Reversed — reset avg and entry info to new direction
                     pos.avg_price = fill_price
+                    self._entry_info[order.symbol] = {
+                        "time":        datetime.utcnow(),
+                        "strategy_id": order.strategy_id or "unknown",
+                        "price":       fill_price,
+                        "sl":          None,
+                        "tp":          None,
+                        "confidence":  None,
+                    }
 
         # ── Update cash ────────────────────────────────────────────────────────
         # For intraday paper trading we do NOT deduct/credit full notional;
@@ -158,6 +212,14 @@ class PaperBroker(BaseBroker):
             "FILL symbol=%s side=%s qty=%d price=%.2f order_id=%s",
             order.symbol, order.side.value, qty, fill_price, order.order_id,
         )
+
+        # Fire trade-closed callback (outside lock scope is fine — called while holding lock)
+        if closed_trade is not None and self.on_trade_closed is not None:
+            try:
+                self.on_trade_closed(closed_trade)
+            except Exception as exc:
+                logger.warning("on_trade_closed callback error: %s", exc)
+
         return fill
 
     def _try_fill_resting(self, symbol: str, ltp: float) -> None:

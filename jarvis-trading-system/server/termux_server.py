@@ -236,6 +236,7 @@ class JarvisEngine:
         feed=None,
     ) -> None:
         self._broker       = PaperBroker(initial_capital=initial_capital, kill_switch_amount=kill_switch_amount)
+        self._broker.on_trade_closed = self._handle_trade_closed
         self._risk_manager = RiskManager(self._broker, kill_switch_amount=kill_switch_amount)
         self._kelly_sizer  = KellySizer(kelly_fraction=kelly_fraction)
         self._aggregator   = BarAggregator()
@@ -803,6 +804,36 @@ class JarvisEngine:
             "approved": decision.approved,
         })
 
+    def _handle_trade_closed(self, trade: dict) -> None:
+        """Called synchronously by PaperBroker when a position fully closes."""
+        regime_str = str(self._regime)
+        asyncio.ensure_future(self._persist_trade(trade, regime_str))
+
+    async def _persist_trade(self, trade: dict, regime: str) -> None:
+        try:
+            await self._pnl_tracker.record_trade(
+                strategy_id = trade["strategy_id"],
+                symbol      = trade["symbol"],
+                side        = trade["side"],
+                qty         = trade["qty"],
+                entry_price = trade["entry_price"],
+                exit_price  = trade["exit_price"],
+                pnl         = trade["pnl"],
+                entry_time  = trade["entry_time"],
+                exit_time   = trade["exit_time"],
+                regime      = regime,
+                sl          = trade.get("sl"),
+                tp          = trade.get("tp"),
+                confidence  = trade.get("confidence"),
+            )
+            logger.info(
+                "JOURNAL  %s %s  pnl=%.2f  entry=%.4f  exit=%.4f",
+                trade["side"], trade["symbol"], trade["pnl"],
+                trade["entry_price"], trade["exit_price"],
+            )
+        except Exception as exc:
+            logger.warning("journal persist failed: %s", exc)
+
     async def _recompute_allocations(self) -> None:
         available = await self._broker.get_available_capital()
         result = self._shift_engine.compute_allocations(list(self._strategies.values()), self._regime, available)
@@ -1044,6 +1075,26 @@ async def _route(method: str, path: str, query: dict, body: dict) -> tuple[int, 
 
     if path == "/api/equity":
         return 200, (await _engine._pnl_tracker.get_equity_curve(days=30) if _engine else {"error": "not ready"})
+
+    if path == "/api/journal" and method == "GET":
+        if not _engine:
+            return 200, {"trades": []}
+        days  = int(query.get("days", ["30"])[0])
+        limit = int(query.get("limit", ["200"])[0])
+        trades = await _engine._pnl_tracker.get_journal(days=days, limit=limit)
+        return 200, {"trades": trades}
+
+    if path.startswith("/api/journal/") and path.endswith("/note") and method == "POST":
+        if not _engine:
+            return 400, {"error": "engine not ready"}
+        try:
+            trade_id = int(path.split("/")[3])
+        except (ValueError, IndexError):
+            return 400, {"error": "invalid trade id"}
+        note = str(body.get("note", "")) if isinstance(body, dict) else ""
+        ok = await _engine._pnl_tracker.save_note(trade_id, note)
+        return (200, {"ok": True}) if ok else (404, {"error": "trade not found"})
+
     if path == "/api/intent":
         n = int(query.get("n", ["50"])[0])
         return 200, (await _engine._intent_logger.tail(n) if _engine else [])

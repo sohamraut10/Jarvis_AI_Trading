@@ -4,6 +4,7 @@ const VIEWS = [
   { id: "mission", label: "Mission Control" },
   { id: "arena",   label: "Strategy Arena" },
   { id: "ledger",  label: "Trade Ledger" },
+  { id: "journal", label: "Trade Journal" },
   { id: "brain",   label: "Brain Analytics" },
   { id: "control", label: "Control Room" },
   { id: "log",     label: "Command Log" },

@@ -39,9 +39,20 @@ CREATE TABLE IF NOT EXISTS trades (
     entry_time   TEXT    NOT NULL,
     exit_time    TEXT    NOT NULL,
     regime       TEXT,
+    sl           REAL,
+    tp           REAL,
+    confidence   REAL,
+    notes        TEXT,
     created_at   TEXT    DEFAULT (datetime('now'))
 )
 """
+
+_MIGRATE_TRADES = [
+    "ALTER TABLE trades ADD COLUMN sl         REAL",
+    "ALTER TABLE trades ADD COLUMN tp         REAL",
+    "ALTER TABLE trades ADD COLUMN confidence REAL",
+    "ALTER TABLE trades ADD COLUMN notes      TEXT",
+]
 
 _CREATE_DAILY = """
 CREATE TABLE IF NOT EXISTS daily_summary (
@@ -72,10 +83,16 @@ class PnLTracker:
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
     async def init(self) -> None:
-        """Create tables if they don't exist. Call once on startup."""
+        """Create tables if they don't exist; migrate existing DBs. Call once on startup."""
         async with aiosqlite.connect(self._db_path) as db:
             await db.execute(_CREATE_TRADES)
             await db.execute(_CREATE_DAILY)
+            # Best-effort migrations for existing databases (ignore if column exists)
+            for stmt in _MIGRATE_TRADES:
+                try:
+                    await db.execute(stmt)
+                except Exception:
+                    pass
             await db.commit()
 
     # ── Write ──────────────────────────────────────────────────────────────────
@@ -92,6 +109,9 @@ class PnLTracker:
         entry_time: Optional[datetime] = None,
         exit_time: Optional[datetime] = None,
         regime: Optional[str] = None,
+        sl: Optional[float] = None,
+        tp: Optional[float] = None,
+        confidence: Optional[float] = None,
     ) -> int:
         """Insert a closed trade and update the daily summary. Returns row id."""
         now = datetime.utcnow()
@@ -106,15 +126,16 @@ class PnLTracker:
                     INSERT INTO trades
                         (strategy_id, symbol, side, qty,
                          entry_price, exit_price, pnl,
-                         trade_date, entry_time, exit_time, regime)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         trade_date, entry_time, exit_time, regime,
+                         sl, tp, confidence)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         strategy_id, symbol, side, qty,
                         entry_price, exit_price, pnl,
                         trade_date,
                         entry_time.isoformat(), exit_time.isoformat(),
-                        regime,
+                        regime, sl, tp, confidence,
                     ),
                 )
                 trade_id = cursor.lastrowid
@@ -122,7 +143,63 @@ class PnLTracker:
                 await db.commit()
         return trade_id
 
+    async def save_note(self, trade_id: int, note: str) -> bool:
+        """Attach or replace a note on a trade. Returns True if row was found."""
+        async with self._lock:
+            async with aiosqlite.connect(self._db_path) as db:
+                cur = await db.execute(
+                    "UPDATE trades SET notes = ? WHERE id = ?", (note.strip(), trade_id)
+                )
+                await db.commit()
+                return cur.rowcount > 0
+
     # ── Read ───────────────────────────────────────────────────────────────────
+
+    async def get_journal(self, days: int = 30, limit: int = 200) -> list[dict]:
+        """Return closed trades newest-first for the trade journal view."""
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT id, trade_date, entry_time, exit_time,
+                       strategy_id, symbol, side, qty,
+                       entry_price, exit_price, pnl,
+                       regime, sl, tp, confidence, notes
+                FROM trades
+                WHERE trade_date >= date('now', ?)
+                ORDER BY exit_time DESC
+                LIMIT ?
+                """,
+                (f"-{days} days", limit),
+            ) as cur:
+                rows = await cur.fetchall()
+        result = []
+        for r in rows:
+            entry = float(r["entry_price"])
+            exit_ = float(r["exit_price"])
+            pnl   = float(r["pnl"])
+            pnl_pct = round((pnl / (entry * int(r["qty"]))) * 100, 2) if entry and r["qty"] else 0.0
+            result.append({
+                "id":          r["id"],
+                "date":        r["trade_date"],
+                "entry_time":  r["entry_time"],
+                "exit_time":   r["exit_time"],
+                "strategy":    r["strategy_id"],
+                "symbol":      r["symbol"],
+                "side":        r["side"],
+                "qty":         r["qty"],
+                "entry":       round(entry, 4),
+                "exit":        round(exit_, 4),
+                "pnl":         round(pnl, 2),
+                "pnl_pct":     pnl_pct,
+                "regime":      r["regime"],
+                "sl":          round(float(r["sl"]), 4) if r["sl"] is not None else None,
+                "tp":          round(float(r["tp"]), 4) if r["tp"] is not None else None,
+                "confidence":  round(float(r["confidence"]), 3) if r["confidence"] is not None else None,
+                "notes":       r["notes"] or "",
+                "win":         pnl > 0,
+            })
+        return result
 
     async def get_daily_pnl(self, for_date: Optional[date] = None) -> float:
         d = (for_date or date.today()).isoformat()

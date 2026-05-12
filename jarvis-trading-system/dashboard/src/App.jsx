@@ -11,6 +11,7 @@ import useWebSocket from "./hooks/useWebSocket";
 import BrainAnalytics from "./views/BrainAnalytics";
 import CommandLog from "./views/CommandLog";
 import ControlRoom from "./views/ControlRoom";
+import Journal from "./views/Journal";
 import MissionControl from "./views/MissionControl";
 import StrategyArena from "./views/StrategyArena";
 import TradeLedger from "./views/TradeLedger";
@@ -220,6 +221,7 @@ export default function App() {
         )}
         {view === "arena"   && <div className="flex-1 overflow-auto"><StrategyArena snapshot={snapshot} signals={signals} /></div>}
         {view === "ledger"  && <div className="flex-1 overflow-auto"><TradeLedger /></div>}
+        {view === "journal" && <div className="flex-1 overflow-hidden flex flex-col"><Journal /></div>}
         {view === "brain"   && <div className="flex-1 overflow-auto"><BrainAnalytics snapshot={snapshot} pnlHistory={pnlHistory} /></div>}
         {view === "control" && (
           <div className="flex-1 overflow-auto">
