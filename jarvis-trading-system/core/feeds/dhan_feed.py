@@ -207,8 +207,6 @@ class DhanFeed:
         loop = asyncio.get_event_loop()
 
         # Wait up to 45 s for the scrip master (downloading in background).
-        # This avoids _raw_currency_search downloading the full 8 MB CSV four
-        # times in the event-loop thread, which would freeze the server.
         from core.feeds.dhan_instruments import get_scrip_master, build_instrument_map
         sm = get_scrip_master()
         if not sm.is_loaded():
@@ -217,52 +215,64 @@ class DhanFeed:
             while not sm.is_loaded() and time.time() < deadline:
                 await asyncio.sleep(2)
             if sm.is_loaded():
-                logger.info("[Dhan] scrip master ready — resolving instruments")
+                logger.info("[Dhan] scrip master ready")
             else:
-                logger.warning("[Dhan] scrip master still loading after 45s — using fallback lookup")
+                logger.warning("[Dhan] scrip master still loading after 45s — continuing")
 
-        # Run synchronously in thread pool to avoid blocking the event loop
-        instrument_map = await loop.run_in_executor(
-            None, build_instrument_map, self._eq_symbols, self._curr_symbols, self._comm_symbols
-        )
+        # ── Dynamic bootstrap: if no static symbols configured, scan Dhan ─────
+        if not self._eq_symbols and not self._curr_symbols and not self._comm_symbols:
+            logger.info("[Dhan] no static symbols — running DhanScanner to discover instruments…")
+            try:
+                from core.feeds.dhan_scanner import DhanScanner
+                scanner = DhanScanner(self._client_id, self._access_token)
+                discovered = await loop.run_in_executor(None, scanner.get_top_instruments)
+                for d in discovered:
+                    sym = d["symbol"]
+                    seg = d["segment"]
+                    sid = d["security_id"]
+                    lot = d["lot_size"]
+                    ltp = d.get("ltp") or None
+                    if sym and sid:
+                        if seg == "NSE_CURR":
+                            self._curr_symbols.append(sym)
+                        else:
+                            self._eq_symbols.append(sym)
+                        self._all_symbols.append(sym)
+                        self._sym_ticks[sym]  = 0
+                        self._id_to_sym[sid]  = sym
+                        self._sub_list.append({"ExchangeSegment": seg, "SecurityId": sid})
+                        self._instrument_lot[sym]  = lot
+                        self._instrument_info[sym] = {"segment": seg, "security_id": sid, "lot_size": lot}
+                        if ltp:
+                            self._sym_ltp[sym] = ltp
+                logger.info("[Dhan] DhanScanner bootstrap: %d instruments selected",
+                            len(self._sub_list))
+            except Exception as exc:
+                logger.warning("[Dhan] DhanScanner failed (%s) — will await auto-discovery", exc)
 
-        if not instrument_map:
-            logger.warning(
-                "[Dhan] no static instruments configured — starting WS ready for "
-                "auto-discovery subscriptions (add watch_symbols/currency_symbols to "
-                "data/settings.json to pre-load instruments)"
+        # ── Static instrument path (symbols were configured in settings.json) ─
+        if self._eq_symbols or self._curr_symbols or self._comm_symbols:
+            instrument_map = await loop.run_in_executor(
+                None, build_instrument_map,
+                self._eq_symbols, self._curr_symbols, self._comm_symbols
             )
-            # Don't abort — keep going so add_instrument() can subscribe dynamically
-            # as auto-discovery finds stocks. The no-ticks watchdog will fall back to
-            # SimulatedFeed if nothing subscribes within %ds.", _NO_TICKS_FALLBACK_SECS
-        # Populate instance vars so dynamic add_instrument() works after startup
-        self._id_to_sym = {sid: sym for sym, (_, sid, _) in instrument_map.items()}
-        self._sub_list  = [
-            {"ExchangeSegment": seg, "SecurityId": sid}
-            for _, (seg, sid, _) in instrument_map.items()
-        ]
-        self._instrument_lot  = {sym: lot for sym, (_, _, lot) in instrument_map.items()}
-        self._instrument_info = {
-            sym: {"segment": seg, "security_id": sid, "lot_size": lot}
-            for sym, (seg, sid, lot) in instrument_map.items()
-        }
+            # Merge into instance state (don't wipe scanner results)
+            for sym, (seg, sid, lot) in instrument_map.items():
+                if sym not in self._instrument_info:
+                    self._id_to_sym[sid]  = sym
+                    self._instrument_lot[sym]  = lot
+                    self._instrument_info[sym] = {"segment": seg, "security_id": sid, "lot_size": lot}
+                    self._sub_list.append({"ExchangeSegment": seg, "SecurityId": sid})
+                    self._sym_ticks.setdefault(sym, 0)
+                    logger.info("[Dhan] static  %-14s  seg=%-10s  sid=%-8s  lot=%d",
+                                sym, seg, sid, lot)
 
-        # Log full subscription list with security IDs so mismatches are easy to spot
-        for sym, (seg, sid, lot) in instrument_map.items():
-            logger.info("[Dhan] subscribed  %-14s  seg=%-10s  sid=%-8s  lot=%d", sym, seg, sid, lot)
-        # Warn about any currency symbols that failed to resolve
-        for curr_sym in self._curr_symbols:
-            if curr_sym not in instrument_map:
-                logger.error(
-                    "[Dhan] ✗ %s NOT in instrument_map — "
-                    "scrip master may have timed out or contract expired. "
-                    "Delete data/scrip_master.csv and restart.",
-                    curr_sym,
-                )
-        logger.info("[Dhan] total subscriptions: %d  (equity=%d  currency=%d)",
-                    len(self._sub_list),
-                    sum(1 for s in instrument_map if s not in self._curr_symbols),
-                    sum(1 for s in instrument_map if s in self._curr_symbols))
+        if not self._sub_list:
+            logger.warning(
+                "[Dhan] no instruments resolved — WS will await add_instrument() calls "
+                "from auto-discovery. Fallback fires in %ds if no ticks arrive.",
+                _NO_TICKS_FALLBACK_SECS,
+            )
 
         await self._preflight_check()
 

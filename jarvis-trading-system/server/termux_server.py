@@ -102,28 +102,26 @@ AI_BRAIN_WARMUP_S      = 90
 AI_BRAIN_INTERVAL_S    = 300
 AI_BRAIN_MAX_PER_CYCLE = 2 if _TERMUX else 3
 
-# ── Forex symbols (yfinance / Yahoo Finance) ──────────────────────────────────
+# ── Forex symbols (yfinance / Yahoo Finance fallback only) ────────────────────
 FOREX_SYMBOLS: list[str] = [
     "EURUSD", "GBPUSD", "USDJPY", "AUDUSD",
     "USDCHF", "USDCAD", "NZDUSD",
 ]
 FOREX_LOT_SIZES: dict[str, int] = {s: 1000 for s in FOREX_SYMBOLS}
 
-# Legacy NSE lists (kept for Dhan path; empty by default on local/yfinance mode)
+# These are populated at runtime from settings.json (if user saved overrides).
+# When Dhan is active they start empty — DhanScanner picks instruments dynamically.
 WATCH_SYMBOLS:    list[str] = []
 CURRENCY_SYMBOLS: list[str] = []
 MCX_SYMBOLS:      list[str] = []
 
-# Fallback base prices used by SimulatedFeed only
+# SimulatedFeed fallback base prices (only used when neither Dhan nor YFinance)
 BASE_PRICES: dict[str, float] = {
     "EURUSD": 1.0820, "GBPUSD": 1.2720, "USDJPY": 149.50,
     "AUDUSD": 0.6480, "USDCHF": 0.9010, "USDCAD": 1.3640,
     "NZDUSD": 0.5980,
-    # Legacy NSE fallbacks
-    "USDINR": 84.0, "EURINR": 90.0, "GBPINR": 105.0, "JPYINR": 0.55,
-    "RELIANCE": 2500.0, "TCS": 3800.0, "INFY": 1500.0,
 }
-CURRENCY_LOT_SIZES: dict[str, int] = {**FOREX_LOT_SIZES}   # unified lookup
+CURRENCY_LOT_SIZES: dict[str, int] = {**FOREX_LOT_SIZES}
 
 _TF_MAP: dict[str, list[str]] = {
     "1min": ["vwap_breakout"],
@@ -823,11 +821,14 @@ class JarvisEngine:
             # (they'd just clutter the dashboard as endless "searching" entries)
             mkt_open = self._equity_market_open_now()
             for sym, data in raw.items():
-                is_currency  = sym in CURRENCY_SYMBOLS
-                is_commodity = sym in MCX_SYMBOLS
+                # Use segment from DhanFeed's own instrument_info (set by DhanScanner
+                # or add_instrument) rather than the now-empty global lists.
+                seg = data.get("segment", "") or ""
+                is_currency  = data.get("is_currency") or seg in ("NSE_CURR", "C")
+                is_commodity = data.get("is_commodity") or seg == "MCX_COMM"
                 is_equity    = not is_currency and not is_commodity
                 if is_equity and not mkt_open and data.get("status") == "searching":
-                    continue    # don't show offline equities that never got a tick
+                    continue
                 scanner[sym] = data
         else:
             # SimulatedFeed — _symbols attr; mark all as live
@@ -1457,10 +1458,15 @@ def _build_feed(cfg: dict):
     if feed_type == "dhan" or (feed_type == "auto" and has_dhan):
         try:
             from core.feeds.dhan_feed import DhanFeed
-            logger.info("Feed: DhanFeed  equity=%s  currency=%s",
-                        ", ".join(WATCH_SYMBOLS) or "none",
-                        ", ".join(CURRENCY_SYMBOLS) or "none")
-            return DhanFeed(client_id, access_token, WATCH_SYMBOLS,
+            # Pass user-saved overrides if any; otherwise pass empty lists so
+            # DhanFeed's dynamic bootstrap (DhanScanner) selects instruments automatically.
+            logger.info(
+                "Feed: DhanFeed  mode=%s  static_equity=%d  static_currency=%d",
+                "static" if (WATCH_SYMBOLS or CURRENCY_SYMBOLS) else "dynamic-discovery",
+                len(WATCH_SYMBOLS), len(CURRENCY_SYMBOLS),
+            )
+            return DhanFeed(client_id, access_token,
+                            WATCH_SYMBOLS,
                             currency_symbols=CURRENCY_SYMBOLS or None,
                             commodity_symbols=MCX_SYMBOLS or None)
         except Exception as exc:
