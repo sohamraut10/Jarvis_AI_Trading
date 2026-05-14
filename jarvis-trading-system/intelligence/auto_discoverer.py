@@ -183,7 +183,7 @@ class AutoDiscoverer:
             sm = get_scrip_master()
             if not sm.is_loaded():
                 return []
-            futures = sm.near_month_futures(segments=["NSE_FNO", "F"])
+            futures = sm.near_month_futures(segments=["NSE_FNO", "D"])
         except Exception as exc:
             logger.warning("[AutoDisc] index futures lookup failed: %s", exc)
             return []

@@ -96,7 +96,7 @@ class DhanScanner:
 
     def _top_index_futures(self, sm, limit: int) -> list[dict]:
         """Always include NIFTY/BANKNIFTY/FINNIFTY near-month index futures."""
-        futures = sm.near_month_futures(segments=["NSE_FNO", "F"])
+        futures = sm.near_month_futures(segments=["NSE_FNO", "D"])
         results: list[dict] = []
         seen: set[str] = set()
         for f in futures:
@@ -134,7 +134,7 @@ class DhanScanner:
     def _top_stock_futures(self, sm, limit: int) -> list[dict]:
         """Top stock futures (FUTSTK) ranked by Dhan live volume × momentum."""
         # Collect near-month FUTSTK — one per underlying (nearest expiry)
-        futures = sm.near_month_futures(segments=["NSE_FNO", "F"])
+        futures = sm.near_month_futures(segments=["NSE_FNO", "D"])
         candidates: dict[str, dict] = {}   # security_id → instrument
         for f in futures:
             if f.get("instrument_type") != "FUTSTK":
