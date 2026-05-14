@@ -1,13 +1,11 @@
 """
 DhanScanner — dynamic instrument discovery using Dhan's own market data.
 
-At startup (and on refresh), it:
-  1. Loads the scrip master to get the F&O-eligible equity universe
-     (stocks that have FUTSTK/OPTSTK derivatives are confirmed liquid)
-  2. Queries Dhan's REST Quote API for live prices + volume
-  3. Ranks by volume × |% change| (momentum-weighted liquidity)
-  4. Returns the top N instruments ready for WebSocket subscription
-  5. Also picks near-month NSE currency futures from scrip master
+Priority order (F&O first):
+  1. Near-month NSE index futures — NIFTY, BANKNIFTY, FINNIFTY (always)
+  2. Top stock futures (FUTSTK) ranked by Dhan live volume × momentum
+  3. Top F&O-eligible equity stocks ranked by Dhan live volume × momentum
+  4. Near-month NSE currency futures (USDINR, EURINR)
 """
 from __future__ import annotations
 
@@ -25,15 +23,21 @@ _TIMEOUT   = 15    # seconds per API call
 _W_VOL = 0.60
 _W_MOM = 0.40
 
-# How many equity + currency instruments to pick
-DEFAULT_TOP_EQUITY   = 25
-DEFAULT_TOP_CURRENCY = 4   # USDINR, EURINR, GBPINR, JPYINR near-month
+# F&O-first slot allocation
+DEFAULT_TOP_INDEX_FUT  = 3    # NIFTY, BANKNIFTY, FINNIFTY near-month futures
+DEFAULT_TOP_STOCK_FUT  = 12   # top stock futures by live Dhan volume
+DEFAULT_TOP_EQUITY     = 10   # F&O-eligible equity stocks (cash)
+DEFAULT_TOP_CURRENCY   = 2    # USDINR, EURINR near-month
+
+# Index underlyings to always include as futures
+_INDEX_UNDERLYINGS = {"NIFTY", "BANKNIFTY", "FINNIFTY"}
 
 
 class DhanScanner:
     """
     Uses Dhan's Quote REST API to discover the most active NSE instruments.
-    All stock selection is purely data-driven — zero hardcoded symbols.
+    F&O instruments are selected first; equity fills remaining slots.
+    All selection is purely data-driven — zero hardcoded symbols.
     """
 
     def __init__(self, client_id: str, access_token: str) -> None:
@@ -59,14 +63,16 @@ class DhanScanner:
 
     def get_top_instruments(
         self,
-        top_equity: int = DEFAULT_TOP_EQUITY,
-        top_currency: int = DEFAULT_TOP_CURRENCY,
+        top_index_fut:  int = DEFAULT_TOP_INDEX_FUT,
+        top_stock_fut:  int = DEFAULT_TOP_STOCK_FUT,
+        top_equity:     int = DEFAULT_TOP_EQUITY,
+        top_currency:   int = DEFAULT_TOP_CURRENCY,
     ) -> list[dict]:
         """
-        Return a list of the most active instruments ready for subscription.
+        Return the most active instruments ready for WebSocket subscription.
+        Priority: index futures → stock futures → equity → currency.
 
-        Each entry:
-          symbol, security_id, segment, ltp, volume, lot_size, score
+        Each entry: symbol, security_id, segment, ltp, volume, lot_size, score
         """
         from core.feeds.dhan_instruments import get_scrip_master
         sm = get_scrip_master()
@@ -75,6 +81,8 @@ class DhanScanner:
             return []
 
         results: list[dict] = []
+        results.extend(self._top_index_futures(sm, top_index_fut))
+        results.extend(self._top_stock_futures(sm, top_stock_fut))
         results.extend(self._top_equity(sm, top_equity))
         results.extend(self._top_currency(sm, top_currency))
         logger.info(
@@ -86,10 +94,98 @@ class DhanScanner:
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
+    def _top_index_futures(self, sm, limit: int) -> list[dict]:
+        """Always include NIFTY/BANKNIFTY/FINNIFTY near-month index futures."""
+        futures = sm.near_month_futures(segments=["NSE_FNO", "F"])
+        results: list[dict] = []
+        seen: set[str] = set()
+        for f in futures:
+            if f.get("instrument_type") != "FUTIDX":
+                continue
+            undl = (f.get("underlying") or f.get("symbol") or "").upper()
+            # Normalize common variants
+            for idx in _INDEX_UNDERLYINGS:
+                if undl.startswith(idx):
+                    undl = idx
+                    break
+            if undl not in _INDEX_UNDERLYINGS or undl in seen:
+                continue
+            seen.add(undl)
+            sid = str(f.get("security_id", ""))
+            if not sid:
+                continue
+            display = f.get("display_name") or f"{undl} FUT"
+            results.append({
+                "symbol":          display,
+                "security_id":     sid,
+                "segment":         "NSE_FNO",
+                "ltp":             float(f.get("last_price") or 0),
+                "volume":          0,
+                "lot_size":        int(f.get("lot_size") or 50),
+                "score":           100.0,   # highest priority — always include
+                "instrument_type": "FUTIDX",
+            })
+            if len(results) >= limit:
+                break
+        logger.info("[DhanScanner] index futures: %s",
+                    ", ".join(r["symbol"] for r in results) or "none found")
+        return results
+
+    def _top_stock_futures(self, sm, limit: int) -> list[dict]:
+        """Top stock futures (FUTSTK) ranked by Dhan live volume × momentum."""
+        # Collect near-month FUTSTK — one per underlying (nearest expiry)
+        futures = sm.near_month_futures(segments=["NSE_FNO", "F"])
+        candidates: dict[str, dict] = {}   # security_id → instrument
+        for f in futures:
+            if f.get("instrument_type") != "FUTSTK":
+                continue
+            sid = str(f.get("security_id", ""))
+            if sid:
+                candidates[sid] = f
+
+        if not candidates:
+            logger.info("[DhanScanner] no FUTSTK found in scrip master")
+            return []
+
+        logger.info("[DhanScanner] %d stock futures found, querying Dhan quotes…",
+                    len(candidates))
+
+        sids   = list(candidates.keys())
+        quotes = self._fetch_quotes("NSE_FNO", sids)
+
+        ranked: list[dict] = []
+        for sid, inst in candidates.items():
+            q = quotes.get(sid) or quotes.get(int(sid) if sid.isdigit() else sid)
+            if not q:
+                continue
+            vol = float(q.get("volume") or q.get("totalTradedQuantity") or 0)
+            pct = abs(float(q.get("percentageChange") or q.get("pChange") or
+                            q.get("percentage_change") or 0))
+            ltp = float(q.get("lastTradedPrice") or q.get("last_price") or
+                        q.get("lastPrice") or 0)
+            if ltp <= 0:
+                continue
+            score = _W_VOL * self._norm(vol) + _W_MOM * min(pct / 5.0, 1.0)
+            display = inst.get("display_name") or inst.get("symbol") or sid
+            ranked.append({
+                "symbol":          display,
+                "security_id":     sid,
+                "segment":         "NSE_FNO",
+                "ltp":             round(ltp, 2),
+                "volume":          int(vol),
+                "lot_size":        int(inst.get("lot_size") or 1),
+                "score":           round(score, 4),
+                "instrument_type": "FUTSTK",
+            })
+
+        ranked.sort(key=lambda x: x["score"], reverse=True)
+        top = ranked[:limit]
+        logger.info("[DhanScanner] top stock futures: %s",
+                    ", ".join(f"{r['symbol']}(vol={r['volume']//1000}K)" for r in top))
+        return top
+
     def _top_equity(self, sm, limit: int) -> list[dict]:
-        """Pick top `limit` NSE equity stocks ranked by Dhan live volume × momentum."""
-        # Step 1: collect F&O-eligible equities from scrip master
-        # (any stock with a futures/options contract is confirmed liquid)
+        """F&O-eligible equity stocks ranked by Dhan live volume × momentum."""
         fno_underlying: dict[str, str] = {}   # underlying_sym → eq_security_id
         for inst in sm._instruments:
             if inst.get("instrument_type") not in ("FUTSTK", "OPTSTK"):
@@ -99,7 +195,6 @@ class DhanScanner:
                 continue
             fno_underlying[undl] = ""
 
-        # Step 2: find the EQ security ID for each F&O underlying
         for inst in sm._instruments:
             if inst.get("instrument_type") != "EQ":
                 continue
@@ -110,7 +205,6 @@ class DhanScanner:
             if sym in fno_underlying and not fno_underlying[sym]:
                 fno_underlying[sym] = str(inst.get("security_id", ""))
 
-        # Keep only those with a resolved EQ security ID
         candidates = {sym: sid for sym, sid in fno_underlying.items() if sid}
         if not candidates:
             logger.warning("[DhanScanner] no F&O-eligible equities found in scrip master")
@@ -119,12 +213,10 @@ class DhanScanner:
         logger.info("[DhanScanner] %d F&O-eligible equities found, querying Dhan quotes…",
                     len(candidates))
 
-        # Step 3: batch-query Dhan Quote API
         syms   = list(candidates.keys())
         sids   = [candidates[s] for s in syms]
         quotes = self._fetch_quotes("NSE_EQ", sids)
 
-        # Step 4: rank by volume × |% change|
         ranked: list[dict] = []
         for sym, sid in zip(syms, sids):
             q = quotes.get(sid) or quotes.get(int(sid) if sid.isdigit() else sid)
@@ -155,7 +247,7 @@ class DhanScanner:
         return top
 
     def _top_currency(self, sm, limit: int) -> list[dict]:
-        """Pick near-month NSE currency futures from scrip master."""
+        """Near-month NSE currency futures from scrip master."""
         futures = sm.near_month_futures(segments=["NSE_CURR", "C"])
         results = []
         seen: set[str] = set()
@@ -185,7 +277,6 @@ class DhanScanner:
         merged: dict = {}
         for i in range(0, len(security_ids), _BATCH_SZ):
             batch = security_ids[i: i + _BATCH_SZ]
-            # Dhan expects integer security IDs in the list
             int_batch = []
             for sid in batch:
                 try:
@@ -202,7 +293,6 @@ class DhanScanner:
                 )
                 if resp.status_code == 200:
                     data = resp.json()
-                    # Response: {"data": {"NSE_EQ": {sid: {...}, ...}}}
                     seg_data = (data.get("data") or data).get(segment, {})
                     for sid_key, q in seg_data.items():
                         merged[str(sid_key)] = q

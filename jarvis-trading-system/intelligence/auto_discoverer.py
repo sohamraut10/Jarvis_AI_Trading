@@ -35,8 +35,9 @@ _OW_OI    = 0.30
 _OW_VOL   = 0.25
 _OW_IV    = 0.15
 
-TOP_EQUITY     = 7    # max equity picks per scan
-TOP_OPTIONS    = 5    # max options picks per scan
+TOP_FUTURES    = 3    # NIFTY/BANKNIFTY/FINNIFTY near-month futures (always first)
+TOP_OPTIONS    = 8    # index options picks per scan (ATM ± wing, all three indices)
+TOP_EQUITY     = 4    # equity spots fill remaining slots
 SCAN_INTERVAL  = 300  # seconds between scans
 
 # NSE index groups to scan for equity opportunities
@@ -58,7 +59,7 @@ class DiscoveredInstrument:
     symbol:           str
     ltp:              float
     segment:          str            # "NSE_EQ" | "NSE_FNO" | "MCX_COMM" | "NSE_CURR"
-    asset_class:      str            # "Equity" | "Index Option" | "Stock Option" | "ETF" | "MCX" | "Currency"
+    asset_class:      str            # "Index Future" | "Index Option" | "Stock Option" | "Equity" | "Currency"
     score:            float          # 0–100
     rank:             int
     direction:        str            # "BUY" | "SELL" | "FLAT"
@@ -129,7 +130,21 @@ class AutoDiscoverer:
     def _scan_sync(self) -> list[DiscoveredInstrument]:
         self._market_open = self._nse.is_market_open()
 
-        # ── Equity scan ───────────────────────────────────────────────────────
+        # ── 1. Index futures — always first, highest priority ─────────────────
+        top_futures = self._scan_index_futures()
+
+        # ── 2. Index options ──────────────────────────────────────────────────
+        opt_candidates: list[DiscoveredInstrument] = []
+        for underlying, oc_key in _INDEX_OPTIONS.items():
+            try:
+                opts = self._scan_options(underlying, oc_key)
+                opt_candidates.extend(opts)
+            except Exception as exc:
+                logger.warning("[AutoDisc] options scan failed for %s: %s", underlying, exc)
+        opt_candidates.sort(key=lambda x: x.score, reverse=True)
+        top_options = opt_candidates[:TOP_OPTIONS]
+
+        # ── 3. Equity — fills remaining slots ────────────────────────────────
         eq_candidates: list[DiscoveredInstrument] = []
         seen: set[str] = set()
         for idx_key in _INDEX_KEYS:
@@ -142,33 +157,79 @@ class AutoDiscoverer:
                 inst = self._score_equity_row(row)
                 if inst:
                     eq_candidates.append(inst)
-
         eq_candidates.sort(key=lambda x: x.score, reverse=True)
-        for i, c in enumerate(eq_candidates):
-            c.rank = i + 1
         top_equity = eq_candidates[:TOP_EQUITY]
 
-        # ── Index options scan ────────────────────────────────────────────────
-        opt_candidates: list[DiscoveredInstrument] = []
-        for underlying, oc_key in _INDEX_OPTIONS.items():
-            try:
-                opts = self._scan_options(underlying, oc_key)
-                opt_candidates.extend(opts)
-            except Exception as exc:
-                logger.warning("[AutoDisc] options scan failed for %s: %s", underlying, exc)
+        # Assign ranks: futures first, then options, then equity
+        combined: list[DiscoveredInstrument] = []
+        rank = 1
+        for group in (top_futures, top_options, top_equity):
+            for inst in group:
+                inst.rank = rank
+                rank += 1
+                combined.append(inst)
 
-        opt_candidates.sort(key=lambda x: x.score, reverse=True)
-        top_options = opt_candidates[:TOP_OPTIONS]
-        for i, o in enumerate(top_options):
-            o.rank = len(top_equity) + i + 1
-
-        combined = top_equity + top_options
         logger.info(
-            "[AutoDisc] equity=%d  options=%d  market_open=%s  top: %s",
-            len(top_equity), len(top_options), self._market_open,
-            "  ".join(f"{c.symbol[:18]}({c.score:.0f}/{c.direction})" for c in combined[:5]),
+            "[AutoDisc] futures=%d  options=%d  equity=%d  market_open=%s  top: %s",
+            len(top_futures), len(top_options), len(top_equity), self._market_open,
+            "  ".join(f"{c.symbol[:16]}({c.score:.0f})" for c in combined[:6]),
         )
         return combined
+
+    def _scan_index_futures(self) -> list[DiscoveredInstrument]:
+        """Near-month NIFTY/BANKNIFTY/FINNIFTY index futures from scrip master."""
+        try:
+            from core.feeds.dhan_instruments import get_scrip_master
+            sm = get_scrip_master()
+            if not sm.is_loaded():
+                return []
+            futures = sm.near_month_futures(segments=["NSE_FNO", "F"])
+        except Exception as exc:
+            logger.warning("[AutoDisc] index futures lookup failed: %s", exc)
+            return []
+
+        target = {"NIFTY": "NIFTY50", "BANKNIFTY": "BANKNIFTY", "FINNIFTY": "FINNIFTY"}
+        results: list[DiscoveredInstrument] = []
+        seen: set[str] = set()
+
+        for f in futures:
+            if f.get("instrument_type") != "FUTIDX":
+                continue
+            undl = (f.get("underlying") or f.get("symbol") or "").upper()
+            # Normalize: "NIFTY 50" → "NIFTY", etc.
+            for key in target:
+                if undl.startswith(key):
+                    undl = key
+                    break
+            if undl not in target or undl in seen:
+                continue
+            seen.add(undl)
+
+            # Fetch underlying spot % change for direction
+            pchange = self._get_index_pchange(undl)
+            direction = "BUY" if pchange > 0.3 else "SELL" if pchange < -0.3 else "FLAT"
+
+            display = f.get("display_name") or f"{undl} FUT"
+            expiry  = str(f.get("expiry") or "")
+
+            results.append(DiscoveredInstrument(
+                symbol        = display,
+                ltp           = float(f.get("last_price") or 0),
+                segment       = "NSE_FNO",
+                asset_class   = "Index Future",
+                score         = 100.0,  # always top priority
+                rank          = 0,
+                direction     = direction,
+                change_pct    = round(pchange, 2),
+                day_range_pct = 0.0,
+                reasoning     = f"Near-month {undl} index future  Δ{pchange:+.2f}%",
+                underlying    = undl,
+                underlying_price = float(f.get("last_price") or 0),
+                expiry        = expiry,
+                security_id   = str(f.get("security_id", "")),
+            ))
+
+        return results[:TOP_FUTURES]
 
     def _scan_options(self, underlying: str, oc_key: str) -> list[DiscoveredInstrument]:
         """Score ATM ± _ATM_WING strikes of the nearest expiry for an index."""
